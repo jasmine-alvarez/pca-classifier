@@ -1,0 +1,11 @@
+genotypename: data/hapmap1.bed
+snpname: data/hapmap1.pedsnp
+indivname: data/hapmap1.pedind
+evecoutname: data/hapmap1.ped.evec
+evaloutname: data/hapmap1.eval
+altnormstyle: NO
+numoutevec: 10
+numoutlieriter: 5
+numoutlierevec: 10
+outliersigmathresh: 6
+qtmode: 0
