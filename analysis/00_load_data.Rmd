@@ -3,8 +3,9 @@ title: "Ancestry classifier with principal components"
 output: html_notebook
 ---
 
-```{r}
-suppressWarnings(library(tidyverse))
+```{r setup, warning = F}
+library(tidyverse)
+library(adegenet)
 ```
 
 
@@ -17,5 +18,5 @@ evec <- read.delim("../data/hapmap1.pca.evec", skip = 1, header = F,
 evec <- Filter(function(x)!all(is.na(x)), evec) %>% 
   dplyr::select(!V14)
 evec[evec$V13 != "Control","V13"] <- "Case"
-colnames(evec) <- c("sample", paste0("pc", seq(10)), "condition")
+colnames(evec) <- c("Sample", paste0("PC", seq(10)), "POP")
 ```
