@@ -1,0 +1,21 @@
+---
+title: "Ancestry classifier with principal components"
+output: html_notebook
+---
+
+```{r}
+suppressWarnings(library(tidyverse))
+```
+
+
+```{r}
+eval <- read.delim("../data/hapmap1.eval", header = F)
+evec1_pc <- round(eval[1,1] / sum(eval) * 100, 2)
+evec2_pc <- round(eval[2,1] / sum(eval) * 100, 2)
+evec <- read.delim("../data/hapmap1.pca.evec", skip = 1, header = F, 
+                   sep = "\t")
+evec <- Filter(function(x)!all(is.na(x)), evec) %>% 
+  dplyr::select(!V14)
+evec[evec$V13 != "Control","V13"] <- "Case"
+colnames(evec) <- c("sample", paste0("pc", seq(10)), "condition")
+```
