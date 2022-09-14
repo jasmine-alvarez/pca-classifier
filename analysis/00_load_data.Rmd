@@ -6,17 +6,27 @@ output: html_notebook
 ```{r setup, warning = F}
 library(tidyverse)
 library(adegenet)
+library(magrittr)
 ```
 
 
 ```{r}
-eval <- read.delim("../data/hapmap1.eval", header = F)
-evec1_pc <- round(eval[1,1] / sum(eval) * 100, 2)
-evec2_pc <- round(eval[2,1] / sum(eval) * 100, 2)
-evec <- read.delim("../data/hapmap1.pca.evec", skip = 1, header = F, 
-                   sep = "\t")
-evec <- Filter(function(x)!all(is.na(x)), evec) %>% 
-  dplyr::select(!V14)
-evec[evec$V13 != "Control","V13"] <- "Case"
-colnames(evec) <- c("Sample", paste0("PC", seq(10)), "POP")
+dat <- adegenet::read.PLINK("../data/acs_mini_project.raw")
+labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
+inds <- grep("", labels$ancestry)
+
+tbl <- as.matrix(dat[inds,])
+rownames(tbl) <- paste0("TGG_",rownames(tbl))
+
+eval <- read.table("../data/amp.eval")
+evec1.pc <- round(eval[1,1]/sum(eval)*100,digits=2)
+
+evec <- read.table("../data/amp.pca.evec", skip = 1)
+colnames(evec) <- c("sample_id", paste0("pca_", seq(60)), "pop")
+evec %<>% dplyr::mutate(sample_id = gsub(":", "_", sample_id)) %>% 
+  dplyr::left_join(labels, by = "sample_id") %>% dplyr::select(-pop)
+```
+
+```{r impute tbl}
+
 ```
