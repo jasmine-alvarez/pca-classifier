@@ -3,6 +3,13 @@ title: "Ancestry classifier with principal components"
 output: html_notebook
 ---
 
+Initial: 2,203,614
+SNPs: 1,372,115
+Common: 129,812
+R^2 < 0.1, no callrate filter (bcftools): 66,142
+
+# TODO: compare pruning methods between bcftools and 
+
 ```{r setup, warning = F}
 library(tidyverse)
 library(adegenet)
@@ -25,28 +32,33 @@ dat@pop <- as.factor(unlist(labels[labeled_inds,
                                       "ancestry"]))
 
 tbl <- as.matrix(dat)
-tbl <- tbl[,grep("^\\.", colnames(tbl), invert = T)]
-tbl <- scale(tbl)
-tbl[is.na(tbl)] <- 0
+# tbl <- tbl[,grep("^\\.", colnames(tbl), invert = T)]
+#tbl <- scale(tbl)
 
 # chose 200 PCs, 6 clusters
-grp <- adegenet::find.clusters(tbl , max.n.clust = 40, center = F)
+grp <- adegenet::find.clusters(tbl , max.n.clust = 40, center = T, scale = T)
 table(adegenet::pop(dat), grp$grp)
 ade4::table.value(table(dat@pop,  grp$grp),
                   col.lab = paste0("cluster_", seq(6)))
 
 grp$grp <- as.factor(grp$grp)
-dapc1 <- adegenet::dapc(tbl, grp$grp)
+tbl <- tbl[,grep("^\\.", colnames(tbl), invert = T)]
+dapc1 <- adegenet::dapc(tbl, grp$grp, center = T, scale = T)
+ade4::scatter(dapc1)
 ```
+
+IMPORTANT: Eigenstrat primarily aimed at datasets with >= 100K markers.
 
 ```{r smartpca}
 eval <- read.table("../data/acs_mini_project.eval")
 evec1.pc <- round(eval[1,1]/sum(eval)*100,digits=2)
 
 evec <- read.table("../data/acs_mini_project.pca.evec", skip = 1)
-colnames(evec) <- c("sample_id", paste0("pca_", seq(60)), "pop")
+colnames(evec) <- c("sample_id", paste0("pca_", seq(200)), "pop")
 evec %<>% dplyr::mutate(sample_id = gsub(":", "_", sample_id)) %>% 
   dplyr::left_join(labels, by = "sample_id") %>% dplyr::select(-pop)
+ggplot2::ggplot(evec, ggplot2::aes(x = pca_1, y = pca_2, color = ancestry, na.rm = T)) +
+  ggplot2::geom_point()
 ```
 
 ```{r impute tbl}
