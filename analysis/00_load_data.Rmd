@@ -3,64 +3,234 @@ title: "Ancestry classifier with principal components"
 output: html_notebook
 ---
 
+0. Pre-processing
+
 Initial: 2,203,614
 SNPs: 1,372,115
 Common: 129,812
+Call rate: 85195
 R^2 < 0.1, no callrate filter (bcftools): 66,142
 
-# TODO: compare pruning methods between bcftools and 
+```{bash, eval = F}
+INFILE=data/acs_mini_project.vcf.gz ; \
+OUTFILE=data/acs_mini_project.2plink
 
-```{r setup, warning = F}
-library(tidyverse)
-library(adegenet)
-library(magrittr)
+bcftools view -m2 -M2 -v snps ${INFILE}.vcf.gz | bcftools +prune -l 0.1 | bcftools +fill-tags | \ bcftools filter -e 'AF < 0.01' | bcftools filter -e 'F_MISSING >= 0.05' | bgzip -c > \ ${OUTFILE}.vcf.gz
 
+grep "^sample_id\|NA" data/acs_mini_project_labels.txt > data/unlabeled_inds.txt
+
+plink --vcf data/${INFILE}.vcf.gz --make-bed --snps-only --remove \ data/unlabeled_inds.txt --out ${OUTFILE}
+
+cp ${OUTFILE}.bim ${OUTFILE}.pedsnp ; cp ${OUTFILE}.fam ${OUTFILE}.pedind
+
+plink --vcf data/acs_mini_project.filtered.vcf.gz --exclude data/unlabeled_inds.txt --snps-only --recodeA --out data/acs_mini_project.2plink
+
+../EIG/bin/smartpca.perl -i ${OUTFILE}.bed \
+-a ${OUTFILE}.pedsnp -b ${OUTFILE}.pedind \
+-p ${OUTFILE}.plot -o ${OUTFILE}.pca \
+-e ${OUTFILE}.eval -l ${OUTFILE}.log
+
+# create unlabeled
+
+plink --vcf data/${INFILE}.vcf.gz --make-bed --snps-only --keep \ data/unlabeled_inds.txt --out ${OUTFILE}.unlabeled
 ```
 
+1. Principal component values for the call set.
 
-```{r}
-dat <- adegenet::read.PLINK("../data/acs_mini_project.raw")
+```{r setup}
+library(tidyverse)
+library(magrittr)
+library(DT)
+library(adegenet)
+
 labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
 labeled_inds <- grep("", labels$ancestry)
 
-adegenet::indNames(dat) = paste0("TGG_",
-          adegenet::indNames(dat))
-dat@gen = dat@gen[labeled_inds]
-dat@ind.names <- dat@ind.names[labeled_inds]
-dat@pop <- dat@pop[labeled_inds]
-dat@pop <- as.factor(unlist(labels[labeled_inds,
-                                      "ancestry"]))
+fname <- "../data/acs_mini_project.2plink"
+dat <- adegenet::read.PLINK(paste0(fname,".raw"))
+dat <- dat[labeled_inds]
+adegenet::indNames(dat) <- paste0("TGG_", adegenet::indNames(dat))
+adegenet::pop(dat) <- labels[labeled_inds, "ancestry"] %>% unlist() %>% as.factor()
+
+pedsnp <- read.delim(file = paste0(fname, ".bim"), header = F)
+pedsnp %<>% dplyr::group_by(V1, V4) %>% 
+  mutate(snp_id = paste(c("chr",V1, V4, V5, V6), collapse = "_"))
+
+gt <- as.matrix(dat)
+adj <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T))/sd(x, na.rm = T)}) %>% as.matrix()
+
+miss_smpl <- data.frame(miss = apply(adj, MARGIN = 1, function(x){ sum(is.na(x)) }) / nrow(adj))
+
+(miss_smpl_hist <- ggplot2::ggplot(miss_smpl, ggplot2::aes(miss)) + 
+    ggplot2::geom_histogram(bins = 100))
+(miss_vrnt_hist <- ggplot2::ggplot(miss_vrnt, ggplot2::aes(miss)) + 
+    ggplot2::geom_histogram())
+
+adj <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T))/sd(x, na.rm = T)}) %>% as.matrix()
+adj <- adj[which(miss_smpl < 0.1),]
+adj <- na.omit(t(adj))
+pca_adj <- prcomp(adj, center = F, scale. = F)
+
+pca_df <- data.frame(
+  pc = seq(length(pca_adj$sdev)),
+  pve = pca_adj$sdev^2 / sum(pca_adj$sdev^2) * 100
+  )
+ggplot2::ggplot(pca_df, ggplot2::aes(x = pc, y = pve)) + 
+  ggplot2::geom_point(stat = "identity") +
+  xlim(0, 20) + ylim(0, 10)
+
+evec <- data.frame(pca_adj$rotation[,seq(10)]) %>%
+  tibble::rownames_to_column("sample_id") %>% 
+  dplyr::left_join(labels, by = "sample_id") %>% 
+  dplyr::relocate(sample_id, ancestry)
+DT::datatable(evec, options = list(scrollX = T))
+```
+
+2. Projecting model to samples with missing labels.
+
+Run smartpca here, not for first:
+- top # PCs
+- excluded SNPs
+- updated samples
+
+```{r knn, eval = F}
+# evec <- read.table("../data/acs_mini_project.2plink.pca.evec") %>% 
+#   dplyr::mutate(V1 = gsub(":", "_", V1)) %>% 
+#   dplyr::rename(sample_id = V1) %>% 
+#   dplyr::left_join(labels, by = "sample_id") %>% 
+#   dplyr::relocate(sample_id, ancestry) %>% dplyr::select(-V42)
+# colnames(evec)[3:42] <- paste0("PC_", seq(40))
+
+set.seed(63549)
+
+tbl <- evec %>% tibble::column_to_rownames("sample_id")
+idx <- sample(1:nrow(tbl), nrow(tbl) * 0.8, replace = F)
+trn_dat <- dplyr::select(tbl, -ancestry)[idx,]
+trn_pop <- factor(tbl$ancestry[idx])
+tst_dat <- dplyr::select(tbl, -ancestry)[-idx,]
+tst_pop <- factor(tbl$ancestry[-idx])
+
+k_times <- 100
+
+trn_err <- rep(0, k_times)
+tst_err <- rep(0, k_times)
+
+for(k in seq(k_times)){
+  knn_trn <- class::knn(train = trn_dat, test = trn_dat, cl = trn_pop, k = k, prob = F)
+  trn_err[k] = sum(knn_trn != trn_pop)/length(trn_pop)
+  # trn_err[k] = mean(knn_trn != trn_pop)
+  knn_tst <- class::knn(train = trn_dat, test = tst_dat, cl = trn_pop, k = k, prob = F)
+  tst_err[k] = sum(knn_tst != tst_pop)/length(tst_pop)
+  # tst_err[k] = mean(knn_tst != tst_pop)
+  }
+
+mydf <- data.frame(k = seq(k_times), trn_err = trn_err, tst_err = tst_err)
+ggplot2::ggplot(mydf, ggplot2::aes(x = k)) +
+  ggplot2::geom_point(aes(y = trn_err), color = "red") +
+  ggplot2::geom_point(aes(y = tst_err), color = "blue") +
+  ggplot2::xlab("k") + ggplot2::ylim(0, 0.08)
+```
+
+3. Distribution of PC values for each sample in the call set.
+
+```{r, eval = F}
+fname <- "../data/acs_mini_project.2plink"
+dat <- adegenet::read.PLINK(paste0(fname,".raw"))
+labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
+labeled_inds <- grep("", labels$ancestry)
+
+pedind <- read.delim(file = "../data/acs_mini_project.2plink.bim", header = F)
+pedind %<>% dplyr::group_by(V1, V4) %>% mutate(snp_id = paste(c("chr",V1, V4, V5, V6), collapse = "_"))
+
+dat <- dat[labeled_inds]
+
+dat@pop <- as.factor(as.character(unlist(labels[labeled_inds, "ancestry"])))
+indNames(dat) <- paste0("TGG_", indNames(dat))
 
 tbl <- as.matrix(dat)
-# tbl <- tbl[,grep("^\\.", colnames(tbl), invert = T)]
-#tbl <- scale(tbl)
+colnames(tbl) <- pedind$snp_id
+
+# get missing data
+miss_smpl <- data.frame(miss = apply(tbl, MARGIN = 1, function(x){ sum(is.na(x)) }) / nrow(tbl))
+miss_vrnt <- data.frame(miss = apply(tbl, MARGIN = 2, function(x){ sum(is.na(x)) }) / nrow(tbl))
+
+# 1286 -> 1004 samples
+tbl <- tbl[miss_smpl < 0.05,]
+
+(miss_smpl_hist <- ggplot2::ggplot(miss_smpl, ggplot2::aes(miss)) + 
+    ggplot2::geom_histogram())
+(miss_vrnt_hist <- ggplot2::ggplot(miss_vrnt, ggplot2::aes(miss)) + 
+    ggplot2::geom_histogram())
+```
+
+4. Supplementary
+
+```{r clustering, eval = F}
+dat <- adegenet::read.PLINK(paste0(fname,".raw"))
+
+dat <- dat[labeled_inds]
+
+dat@pop <- as.factor(as.character(unlist(labels[labeled_inds, "ancestry"])))
+indNames(dat) <- paste0("TGG_", indNames(dat))
+
+tbl <- as.matrix(dat)
+colnames(tbl) <- pedind$snp_id
 
 # chose 200 PCs, 6 clusters
 grp <- adegenet::find.clusters(tbl , max.n.clust = 40, center = T, scale = T)
 table(adegenet::pop(dat), grp$grp)
 ade4::table.value(table(dat@pop,  grp$grp),
-                  col.lab = paste0("cluster_", seq(6)))
+                  col.lab = paste0("cluster_", seq(40)))
+                  
+mydat <- data.frame(n_clusters = seq(60), BIC_score = grp$Kstat)
+(BIC_clusters <- ggplot2::ggplot(mydat, ggplot2::aes(x = n_clusters, y = BIC_score)) +
+  geom_point())
 
-grp$grp <- as.factor(grp$grp)
-tbl <- tbl[,grep("^\\.", colnames(tbl), invert = T)]
-dapc1 <- adegenet::dapc(tbl, grp$grp, center = T, scale = T)
+dapc1 <- adegenet::dapc(tbl, as.factor(grp$grp), center = T, scale = T)
 ade4::scatter(dapc1)
-```
 
-IMPORTANT: Eigenstrat primarily aimed at datasets with >= 100K markers.
+contrib <- loadingplot(dapc1$var.contr, axis=2,thres=.07, lab.jitter=1)
 
-```{r smartpca}
-eval <- read.table("../data/acs_mini_project.eval")
-evec1.pc <- round(eval[1,1]/sum(eval)*100,digits=2)
+compoplot(dapc1, posi="bottomright",
+txt.leg=paste("Cluster", 1:6), lab="",
+ncol=1, xlab="individuals")
 
-evec <- read.table("../data/acs_mini_project.pca.evec", skip = 1)
-colnames(evec) <- c("sample_id", paste0("pca_", seq(200)), "pop")
-evec %<>% dplyr::mutate(sample_id = gsub(":", "_", sample_id)) %>% 
-  dplyr::left_join(labels, by = "sample_id") %>% dplyr::select(-pop)
-ggplot2::ggplot(evec, ggplot2::aes(x = pca_1, y = pca_2, color = ancestry, na.rm = T)) +
-  ggplot2::geom_point()
-```
+temp <- a.score(dapc1)
+optim <- optim.a.score(dapc1)
 
-```{r impute tbl}
+mtx <-adegenet::tab(dat, NA.method="mean")
+colnames(mtx) <- pedind$snp_id
+popx <- pop(dat)
 
+xval <- xvalDapc(mtx, popx, n.pca.max = 300, training.set = 0.9,
+result = "groupMean", center = TRUE, scale = TRUE,
+n.pca = NULL, n.rep = 30, xval.plot = TRUE)
+
+xx <- read.delim("../plink.eigenval", sep = " ", header = F)
+yy <- read.delim("../plink.eigenvec", sep = " ", header = F)
+
+# read in the eigenvectors, produced in PLINK
+eigenvec <- read.table('../plink.eigenvec', header = FALSE, skip=0, sep = ' ')
+eigenvec %<>% dplyr::group_by(V1, V2) %>% 
+  dplyr::mutate(sample_id = paste(c(V1, V2), collapse = "_"))
+eigenvec %<>% dplyr::left_join(labels, by = "sample_id")
+
+pops <- as.factor(as.character(unlist(labels[labeled_inds, "ancestry"])))
+cols <-  RColorBrewer::brewer.pal(6, "Set2")
+
+round(xx[1,1]/sum(xx)*100,digits=2)
+
+scree <- data.frame(PC = seq(20),
+                    eig = (round(xx[seq(20),1]/sum(xx)*100,digits=2)))
+ggplot2::ggplot(scree, aes(x = PC, y = eig)) + geom_point(stat = "identity")
+
+for (i in seq(20)) {
+  message(round(xx[i,1]/sum(xx)*100,digits=2))
+}
+
+project.pca <- eigenvec
+summary(project.pca)
+
+ggplot2::ggplot(project.pca, aes(x = V3, y = V4, color = ancestry)) + 
+  geom_point()
 ```
