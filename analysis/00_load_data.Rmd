@@ -52,34 +52,44 @@ dat <- dat[labeled_inds]
 adegenet::indNames(dat) <- paste0("TGG_", adegenet::indNames(dat))
 adegenet::pop(dat) <- labels[labeled_inds, "ancestry"] %>% unlist() %>% as.factor()
 
-pedsnp <- read.delim(file = paste0(fname, ".bim"), header = F)
-pedsnp %<>% dplyr::group_by(V1, V4) %>% 
-  mutate(snp_id = paste(c("chr",V1, V4, V5, V6), collapse = "_"))
+# pedsnp <- read.delim(file = paste0(fname, ".bim"), header = F)
+# pedsnp %<>% dplyr::group_by(V1, V4) %>% 
+#   mutate(snp_id = paste(c("chr",V1, V4, V5, V6), collapse = "_"))
 
 gt <- as.matrix(dat)
-adj <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T))/sd(x, na.rm = T)}) %>% as.matrix()
+miss_smpl <- apply(gt, 1, function(x) {sum(is.na(x))/nrow(gt)})
+na_vars <- apply(gt, 2, function(x) {sum(is.na(x))/nrow(gt)})
+nonmiss_vars <- which(log2(na_vars + 1) < 0.001) %>% as.integer()
+nonmiss_idx <- which(miss_smpl < 0.1) %>% as.integer()
 
-miss_smpl <- data.frame(miss = apply(adj, MARGIN = 1, function(x){ sum(is.na(x)) }) / nrow(adj))
+# (miss_smpl_hist <- ggplot2::ggplot(miss_smpl, ggplot2::aes(miss)) + 
+#     ggplot2::geom_histogram(bins = 100))
+# (miss_vrnt_hist <- ggplot2::ggplot(miss_vrnt, ggplot2::aes(miss)) + 
+#     ggplot2::geom_histogram())      
 
-(miss_smpl_hist <- ggplot2::ggplot(miss_smpl, ggplot2::aes(miss)) + 
-    ggplot2::geom_histogram(bins = 100))
-(miss_vrnt_hist <- ggplot2::ggplot(miss_vrnt, ggplot2::aes(miss)) + 
-    ggplot2::geom_histogram())
+gt <- as.matrix(dat)
+gt <- gt[nonmiss_idx,nonmiss_vars]
 
-adj <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T))/sd(x, na.rm = T)}) %>% as.matrix()
-adj <- adj[which(miss_smpl < 0.1),]
-adj <- na.omit(t(adj))
-pca_adj <- prcomp(adj, center = F, scale. = F)
+nonzero_var <- which(apply(gt, 2, function(x) {var(x, na.rm = T)}) != 0)
+gt_std <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T)) / sd(x, na.rm = T)})
+gt_std <- gt_std[, nonzero_var]
+```
+
+```{r}
+gt_pca <- prcomp(t(gt_std), center = F, scale. = F)
 
 pca_df <- data.frame(
-  pc = seq(length(pca_adj$sdev)),
-  pve = pca_adj$sdev^2 / sum(pca_adj$sdev^2) * 100
+  pc = seq(length(gt_pca$sdev)),
+  pve = gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100
   )
 ggplot2::ggplot(pca_df, ggplot2::aes(x = pc, y = pve)) + 
   ggplot2::geom_point(stat = "identity") +
   xlim(0, 20) + ylim(0, 10)
 
-evec <- data.frame(pca_adj$rotation[,seq(10)]) %>%
+ggplot2::ggplot(pca_df, ggplot2::aes(x = pc, y = cumsum(pve)/100)) + ggplot2::geom_point(stat = "identity") +
+  xlim(0, 20)
+
+evec <- data.frame(gt_pca$rotation[,seq(10)]) %>%
   tibble::rownames_to_column("sample_id") %>% 
   dplyr::left_join(labels, by = "sample_id") %>% 
   dplyr::relocate(sample_id, ancestry)
@@ -92,6 +102,12 @@ Run smartpca here, not for first:
 - top # PCs
 - excluded SNPs
 - updated samples
+
+final--return table with predicted ancestry of unlabeled
+
+```{bash smartpca, eval = F}
+
+```
 
 ```{r knn, eval = F}
 # evec <- read.table("../data/acs_mini_project.2plink.pca.evec") %>% 
@@ -118,10 +134,8 @@ tst_err <- rep(0, k_times)
 for(k in seq(k_times)){
   knn_trn <- class::knn(train = trn_dat, test = trn_dat, cl = trn_pop, k = k, prob = F)
   trn_err[k] = sum(knn_trn != trn_pop)/length(trn_pop)
-  # trn_err[k] = mean(knn_trn != trn_pop)
   knn_tst <- class::knn(train = trn_dat, test = tst_dat, cl = trn_pop, k = k, prob = F)
   tst_err[k] = sum(knn_tst != tst_pop)/length(tst_pop)
-  # tst_err[k] = mean(knn_tst != tst_pop)
   }
 
 mydf <- data.frame(k = seq(k_times), trn_err = trn_err, tst_err = tst_err)
@@ -131,37 +145,17 @@ ggplot2::ggplot(mydf, ggplot2::aes(x = k)) +
   ggplot2::xlab("k") + ggplot2::ylim(0, 0.08)
 ```
 
-3. Distribution of PC values for each sample in the call set.
+3. Distribution of PC values calc'd by smartpca of all samples, colored by ancestry and shape
+by label vs unlabeled
 
 ```{r, eval = F}
-fname <- "../data/acs_mini_project.2plink"
-dat <- adegenet::read.PLINK(paste0(fname,".raw"))
-labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
-labeled_inds <- grep("", labels$ancestry)
+plot_df <- data.frame(sample_id = rownames(gt_pca$rotation),
+                      pc_1 = gt_pca$rotation[,1],
+                      pc_2 = gt_pca$rotation[,2]) %>% 
+  dplyr::left_join(labels, by = "sample_id")
 
-pedind <- read.delim(file = "../data/acs_mini_project.2plink.bim", header = F)
-pedind %<>% dplyr::group_by(V1, V4) %>% mutate(snp_id = paste(c("chr",V1, V4, V5, V6), collapse = "_"))
-
-dat <- dat[labeled_inds]
-
-dat@pop <- as.factor(as.character(unlist(labels[labeled_inds, "ancestry"])))
-indNames(dat) <- paste0("TGG_", indNames(dat))
-
-tbl <- as.matrix(dat)
-colnames(tbl) <- pedind$snp_id
-
-# get missing data
-miss_smpl <- data.frame(miss = apply(tbl, MARGIN = 1, function(x){ sum(is.na(x)) }) / nrow(tbl))
-miss_vrnt <- data.frame(miss = apply(tbl, MARGIN = 2, function(x){ sum(is.na(x)) }) / nrow(tbl))
-
-# 1286 -> 1004 samples
-tbl <- tbl[miss_smpl < 0.05,]
-
-(miss_smpl_hist <- ggplot2::ggplot(miss_smpl, ggplot2::aes(miss)) + 
-    ggplot2::geom_histogram())
-(miss_vrnt_hist <- ggplot2::ggplot(miss_vrnt, ggplot2::aes(miss)) + 
-    ggplot2::geom_histogram())
-```
+ggplot2::ggplot(plot_df, ggplot2::aes(x = pc_1, y = pc_2, color = ancestry)) +
+  ggplot2::geom_point()```
 
 4. Supplementary
 
