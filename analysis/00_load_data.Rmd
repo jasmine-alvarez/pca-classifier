@@ -21,23 +21,14 @@ grep "^sample_id\|NA" data/acs_mini_project_labels.txt > data/unlabeled_inds.txt
 
 plink --vcf data/${INFILE}.vcf.gz --make-bed --snps-only --remove \ data/unlabeled_inds.txt --out ${OUTFILE}
 
-cp ${OUTFILE}.bim ${OUTFILE}.pedsnp ; cp ${OUTFILE}.fam ${OUTFILE}.pedind
-
-plink --vcf data/acs_mini_project.filtered.vcf.gz --exclude data/unlabeled_inds.txt --snps-only --recodeA --out data/acs_mini_project.2plink
-
-../EIG/bin/smartpca.perl -i ${OUTFILE}.bed \
--a ${OUTFILE}.pedsnp -b ${OUTFILE}.pedind \
--p ${OUTFILE}.plot -o ${OUTFILE}.pca \
--e ${OUTFILE}.eval -l ${OUTFILE}.log
-
 # create unlabeled
 
-plink --vcf data/${INFILE}.vcf.gz --make-bed --snps-only --keep \ data/unlabeled_inds.txt --out ${OUTFILE}.unlabeled
+
 ```
 
 1. Principal component values for the call set.
 
-```{r setup}
+```{r setup, eval = F}
 library(tidyverse)
 library(magrittr)
 library(DT)
@@ -48,52 +39,41 @@ labeled_inds <- grep("", labels$ancestry)
 
 fname <- "../data/acs_mini_project.2plink"
 dat <- adegenet::read.PLINK(paste0(fname,".raw"))
-dat <- dat[labeled_inds]
 adegenet::indNames(dat) <- paste0("TGG_", adegenet::indNames(dat))
-adegenet::pop(dat) <- labels[labeled_inds, "ancestry"] %>% unlist() %>% as.factor()
-
-# pedsnp <- read.delim(file = paste0(fname, ".bim"), header = F)
-# pedsnp %<>% dplyr::group_by(V1, V4) %>% 
-#   mutate(snp_id = paste(c("chr",V1, V4, V5, V6), collapse = "_"))
+adegenet::pop(dat) <- labels$ancestry %>% unlist() %>% as.factor()
 
 gt <- as.matrix(dat)
-miss_smpl <- apply(gt, 1, function(x) {sum(is.na(x))/nrow(gt)})
-na_vars <- apply(gt, 2, function(x) {sum(is.na(x))/nrow(gt)})
-nonmiss_vars <- which(log2(na_vars + 1) < 0.001) %>% as.integer()
-nonmiss_idx <- which(miss_smpl < 0.1) %>% as.integer()
-
-# (miss_smpl_hist <- ggplot2::ggplot(miss_smpl, ggplot2::aes(miss)) + 
-#     ggplot2::geom_histogram(bins = 100))
-# (miss_vrnt_hist <- ggplot2::ggplot(miss_vrnt, ggplot2::aes(miss)) + 
-#     ggplot2::geom_histogram())      
-
-gt <- as.matrix(dat)
-gt <- gt[nonmiss_idx,nonmiss_vars]
-
-nonzero_var <- which(apply(gt, 2, function(x) {var(x, na.rm = T)}) != 0)
-gt_std <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T)) / sd(x, na.rm = T)})
-gt_std <- gt_std[, nonzero_var]
-```
-
-```{r}
-gt_pca <- prcomp(t(gt_std), center = F, scale. = F)
+gt <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T)) / sd(x, na.rm = T)})
+gt <- log2(gt + 1)
+labeled_idx <- which(rownames(gt) %in% unlist(labels[labeled_inds, "sample_id"]))
+gt <- t(na.omit(t(gt)))
+gt_pca <- prcomp(x = gt[labeled_idx,],center = F, scale. = F)
 
 pca_df <- data.frame(
   pc = seq(length(gt_pca$sdev)),
-  pve = gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100
+  pve = gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100,
+  cumsum_pve = cumsum(gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100)
   )
-ggplot2::ggplot(pca_df, ggplot2::aes(x = pc, y = pve)) + 
-  ggplot2::geom_point(stat = "identity") +
-  xlim(0, 20) + ylim(0, 10)
 
-ggplot2::ggplot(pca_df, ggplot2::aes(x = pc, y = cumsum(pve)/100)) + ggplot2::geom_point(stat = "identity") +
-  xlim(0, 20)
+k_clusters <- pca_df$cumsum_pve[pca_df$cumsum_pve < quantile(pca_df$cumsum_pve, 0.25)] %>% length()
 
-evec <- data.frame(gt_pca$rotation[,seq(10)]) %>%
+ggplot2::ggplot(pca_df, aes(x = pc, y = cumsum_pve)) +
+  geom_point(stat = "identity")
+
+gt_unlabeled<- gt[-labeled_idx,]
+prd_model <- predict(gt_pca, gt_unlabeled)
+
+```
+
+```{r}
+evec <- predict(gt_pca, gt) %>%
+  as.data.frame() %>% 
   tibble::rownames_to_column("sample_id") %>% 
   dplyr::left_join(labels, by = "sample_id") %>% 
-  dplyr::relocate(sample_id, ancestry)
-DT::datatable(evec, options = list(scrollX = T))
+  dplyr::relocate(sample_id, ancestry) %>% 
+  dplyr::select(sample_id:PC10)
+
+DT::datatable(evec[,seq(12)], options = list(scrollX = T))
 ```
 
 2. Projecting model to samples with missing labels.
@@ -105,28 +85,18 @@ Run smartpca here, not for first:
 
 final--return table with predicted ancestry of unlabeled
 
-```{bash smartpca, eval = F}
-
-```
-
-```{r knn, eval = F}
-# evec <- read.table("../data/acs_mini_project.2plink.pca.evec") %>% 
-#   dplyr::mutate(V1 = gsub(":", "_", V1)) %>% 
-#   dplyr::rename(sample_id = V1) %>% 
-#   dplyr::left_join(labels, by = "sample_id") %>% 
-#   dplyr::relocate(sample_id, ancestry) %>% dplyr::select(-V42)
-# colnames(evec)[3:42] <- paste0("PC_", seq(40))
-
+```{r model, eval = F}
 set.seed(63549)
+# scale(newdata, pca$center, pca$scale) %*% pca$rotation 
+evec_trn <- evec %>% dplyr::filter(!is.na(ancestry)) %>% tibble::column_to_rownames("sample_id")
 
-tbl <- evec %>% tibble::column_to_rownames("sample_id")
-idx <- sample(1:nrow(tbl), nrow(tbl) * 0.8, replace = F)
-trn_dat <- dplyr::select(tbl, -ancestry)[idx,]
-trn_pop <- factor(tbl$ancestry[idx])
-tst_dat <- dplyr::select(tbl, -ancestry)[-idx,]
-tst_pop <- factor(tbl$ancestry[-idx])
+idx <- sample(1:nrow(evec_trn), nrow(evec_trn) * 0.8, replace = F)
+trn_dat <- evec_trn[idx, c(-1)]
+trn_pop <- as.factor(evec_trn[idx, c(1)])
+tst_dat <- evec_trn[-idx, c(-1)]
+tst_pop <- as.factor(evec_trn[-idx, c(1)])
 
-k_times <- 100
+k_times <- 60
 
 trn_err <- rep(0, k_times)
 tst_err <- rep(0, k_times)
@@ -138,11 +108,20 @@ for(k in seq(k_times)){
   tst_err[k] = sum(knn_tst != tst_pop)/length(tst_pop)
   }
 
-mydf <- data.frame(k = seq(k_times), trn_err = trn_err, tst_err = tst_err)
-ggplot2::ggplot(mydf, ggplot2::aes(x = k)) +
-  ggplot2::geom_point(aes(y = trn_err), color = "red") +
-  ggplot2::geom_point(aes(y = tst_err), color = "blue") +
-  ggplot2::xlab("k") + ggplot2::ylim(0, 0.08)
+knn_df <- data.frame(k = seq(k_times), trn_err = trn_err, tst_err = tst_err)
+ggplot2::ggplot(knn_df, ggplot2::aes(x = k)) +
+  ggplot2::geom_line(aes(y = trn_err * 100), color = "red") +
+  ggplot2::geom_line(aes(y = tst_err * 100), color = "blue") +
+  ggplot2::xlab("k") +ggplot2::ylab("Error rate (%)")
+
+unl_dat <- evec %>% dplyr::filter(is.na(ancestry)) %>% tibble::column_to_rownames("sample_id") %>% 
+  dplyr::select(-ancestry)
+evec_unl <- class::knn(train = trn_dat, test = unl_dat, cl = trn_pop, k = k, prob = F)
+
+evec[-labeled_idx,"ancestry"] <- as.character(evec_unl)
+evec_new <- evec %>% dplyr::filter(is.na(ancestry)) %>% dplyr::mutate(ancestry = evec_unl)
+
+DT::datatable(pred_pops, options = list(scrollX = T))
 ```
 
 3. Distribution of PC values calc'd by smartpca of all samples, colored by ancestry and shape
@@ -155,7 +134,8 @@ plot_df <- data.frame(sample_id = rownames(gt_pca$rotation),
   dplyr::left_join(labels, by = "sample_id")
 
 ggplot2::ggplot(plot_df, ggplot2::aes(x = pc_1, y = pc_2, color = ancestry)) +
-  ggplot2::geom_point()```
+  ggplot2::geom_point()
+```
 
 4. Supplementary
 
