@@ -33,6 +33,10 @@ library(tidyverse)
 library(magrittr)
 library(DT)
 library(adegenet)
+library(GGally)
+library(RColorBrewer)
+library(ggforce)
+library(ggnewscale)
 
 labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
 labeled_inds <- grep("", labels$ancestry)
@@ -43,27 +47,36 @@ adegenet::indNames(dat) <- paste0("TGG_", adegenet::indNames(dat))
 adegenet::pop(dat) <- labels$ancestry %>% unlist() %>% as.factor()
 
 gt <- as.matrix(dat)
-gt <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T)) / sd(x, na.rm = T)})
-gt <- log2(gt + 1)
-labeled_idx <- which(rownames(gt) %in% unlist(labels[labeled_inds, "sample_id"]))
-gt <- t(na.omit(t(gt)))
-gt_pca <- prcomp(x = gt[labeled_idx,],center = F, scale. = F)
 
-pca_df <- data.frame(
+missing_vrnt <- apply(gt_2, 2, function(x) {sum(is.na(x))/ncol(gt) * 100})
+missing_smpl <- apply(gt_2, 1, function(x) {sum(is.na(x))/nrow(gt) * 100})
+
+# > miss_smpl_idx
+#  TGG_102  TGG_231  TGG_441  TGG_765  TGG_971 TGG_1563 TGG_1850 
+#       36       94      169      274      331      534      633 
+
+miss_smpl_idx <- which(missing_smpl > 10)
+gt <- gt[-miss_smpl_idx,]
+gt <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T)) / sd(x, na.rm = T)})
+gt <- t(gt) %>% na.omit() %>% t()
+
+labeled_idx <- which(rownames(gt) %in% unlist(labels[labeled_inds, "sample_id"]))
+
+gt_pca <- prcomp(x = gt[labeled_idx,], center = F, scale. = F)
+
+pca_pve <- data.frame(
   pc = seq(length(gt_pca$sdev)),
   pve = gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100,
   cumsum_pve = cumsum(gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100)
   )
 
-k_clusters <- pca_df$cumsum_pve[pca_df$cumsum_pve < quantile(pca_df$cumsum_pve, 0.25)] %>% length()
-
-ggplot2::ggplot(pca_df, aes(x = pc, y = cumsum_pve)) +
+ggplot2::ggplot(pca_pve, aes(x = pc, y = pve)) +
+  geom_point(stat = "identity") + xlim(0, 30)
+ggplot2::ggplot(pca_pve, aes(x = pc, y = cumsum_pve)) +
   geom_point(stat = "identity")
-
-gt_unlabeled<- gt[-labeled_idx,]
-prd_model <- predict(gt_pca, gt_unlabeled)
-
 ```
+
+Applying predicted model.
 
 ```{r}
 evec <- predict(gt_pca, gt) %>%
@@ -71,23 +84,16 @@ evec <- predict(gt_pca, gt) %>%
   tibble::rownames_to_column("sample_id") %>% 
   dplyr::left_join(labels, by = "sample_id") %>% 
   dplyr::relocate(sample_id, ancestry) %>% 
-  dplyr::select(sample_id:PC10)
+  dplyr::select(sample_id:PC30)
 
-DT::datatable(evec[,seq(12)], options = list(scrollX = T))
+DT::datatable(evec, options = list(scrollX = T))
 ```
 
 2. Projecting model to samples with missing labels.
 
-Run smartpca here, not for first:
-- top # PCs
-- excluded SNPs
-- updated samples
-
-final--return table with predicted ancestry of unlabeled
 
 ```{r model, eval = F}
 set.seed(63549)
-# scale(newdata, pca$center, pca$scale) %*% pca$rotation 
 evec_trn <- evec %>% dplyr::filter(!is.na(ancestry)) %>% tibble::column_to_rownames("sample_id")
 
 idx <- sample(1:nrow(evec_trn), nrow(evec_trn) * 0.8, replace = F)
@@ -96,7 +102,8 @@ trn_pop <- as.factor(evec_trn[idx, c(1)])
 tst_dat <- evec_trn[-idx, c(-1)]
 tst_pop <- as.factor(evec_trn[-idx, c(1)])
 
-k_times <- 60
+sqrt_trn_len <- round(sqrt(nrow(trn_dat)))
+k_times <- 100
 
 trn_err <- rep(0, k_times)
 tst_err <- rep(0, k_times)
@@ -114,97 +121,67 @@ ggplot2::ggplot(knn_df, ggplot2::aes(x = k)) +
   ggplot2::geom_line(aes(y = tst_err * 100), color = "blue") +
   ggplot2::xlab("k") +ggplot2::ylab("Error rate (%)")
 
-unl_dat <- evec %>% dplyr::filter(is.na(ancestry)) %>% tibble::column_to_rownames("sample_id") %>% 
+```
+
+Choose most accurate.
+
+```{r}
+unl_dat <- evec %>% dplyr::filter(is.na(ancestry)) %>% 
+  tibble::column_to_rownames("sample_id") %>% 
   dplyr::select(-ancestry)
-evec_unl <- class::knn(train = trn_dat, test = unl_dat, cl = trn_pop, k = k, prob = F)
+
+pred_unl <- class::knn(train = trn_dat, test = unl_dat, cl = trn_pop, k = 50, prob = F)
 
 evec[-labeled_idx,"ancestry"] <- as.character(evec_unl)
-evec_new <- evec %>% dplyr::filter(is.na(ancestry)) %>% dplyr::mutate(ancestry = evec_unl)
+evec_df <- evec %>% 
+  dplyr::mutate(labeled = as.character(
+    sample_id %in% unlist(labels[labeled_inds, "sample_id"]))) %>% 
+  dplyr::mutate(labeled = tolower(labeled)) %>% 
+  dplyr::relocate(sample_id, ancestry, labeled)
+levels(evec_df$labeled) <- c("true", "false")
 
-DT::datatable(pred_pops, options = list(scrollX = T))
+DT::datatable(evec_df, options = list(scrollX = T))
 ```
 
 3. Distribution of PC values calc'd by smartpca of all samples, colored by ancestry and shape
 by label vs unlabeled
 
-```{r, eval = F}
-plot_df <- data.frame(sample_id = rownames(gt_pca$rotation),
-                      pc_1 = gt_pca$rotation[,1],
-                      pc_2 = gt_pca$rotation[,2]) %>% 
-  dplyr::left_join(labels, by = "sample_id")
+```{r}
 
-ggplot2::ggplot(plot_df, ggplot2::aes(x = pc_1, y = pc_2, color = ancestry)) +
-  ggplot2::geom_point()
-```
+pca_df <- evec_df %>% dplyr::select(sample_id:PC3) %>% 
+  tidyr::pivot_longer(c(ancestry, labeled), names_to = "grp", values_to = "val")
+levels(pca_df$grp) = c("ancestry", "labeled")
 
-4. Supplementary
+plot_legend <- ggplot2::ggplot(subset(pca_df, grp == "ancestry"), aes(x = PC1, y = PC2)) +
+  geom_jitter(aes(color = val)) + 
+  scale_color_manual(values = brewer.pal(6, "Set2"), name = "ancestry") +
+  ggnewscale::new_scale_color() +
+  geom_jitter(data = subset(pca_df, grp == "labeled"), aes(color = val)) +
+  scale_color_manual(values = brewer.pal(3, "Dark2")[-3], name = "labeled")
 
-```{r clustering, eval = F}
-dat <- adegenet::read.PLINK(paste0(fname,".raw"))
+pca_plot <- function(pc_a, pc_b, grp_by) {
+  mplot <- ggplot2::ggplot(subset(pca_df, grp == grp_by), aes_string(x = pc_a, y = pc_b)) +
+    geom_jitter(aes(color = val)) + theme(legend.position = "none") + xlim(-100, 100) +
+    ylim(-100, 100)
+  return(mplot)
+  }
 
-dat <- dat[labeled_inds]
+pca_matrix <- ggpairs(evec_df, columns = c("PC1", "PC2", "PC3"),
+                    upper = NULL, lower = NULL, diag = NULL, 
+                    legend = GGally::grab_legend(plot_legend))
+pca_matrix[2,1] <- pca_plot("PC1", "PC2", "ancestry")
+pca_matrix[3,1] <- pca_plot("PC1", "PC3", "ancestry")
+pca_matrix[3,2] <- pca_plot("PC2", "PC3", "ancestry")
+pca_matrix[1,2] <- pca_plot("PC1", "PC2", "labeled")
+pca_matrix[1,3] <- pca_plot("PC1", "PC3", "labeled")
+pca_matrix[2,3] <- pca_plot("PC2", "PC3", "labeled")
 
-dat@pop <- as.factor(as.character(unlist(labels[labeled_inds, "ancestry"])))
-indNames(dat) <- paste0("TGG_", indNames(dat))
-
-tbl <- as.matrix(dat)
-colnames(tbl) <- pedind$snp_id
-
-# chose 200 PCs, 6 clusters
-grp <- adegenet::find.clusters(tbl , max.n.clust = 40, center = T, scale = T)
-table(adegenet::pop(dat), grp$grp)
-ade4::table.value(table(dat@pop,  grp$grp),
-                  col.lab = paste0("cluster_", seq(40)))
-                  
-mydat <- data.frame(n_clusters = seq(60), BIC_score = grp$Kstat)
-(BIC_clusters <- ggplot2::ggplot(mydat, ggplot2::aes(x = n_clusters, y = BIC_score)) +
-  geom_point())
-
-dapc1 <- adegenet::dapc(tbl, as.factor(grp$grp), center = T, scale = T)
-ade4::scatter(dapc1)
-
-contrib <- loadingplot(dapc1$var.contr, axis=2,thres=.07, lab.jitter=1)
-
-compoplot(dapc1, posi="bottomright",
-txt.leg=paste("Cluster", 1:6), lab="",
-ncol=1, xlab="individuals")
-
-temp <- a.score(dapc1)
-optim <- optim.a.score(dapc1)
-
-mtx <-adegenet::tab(dat, NA.method="mean")
-colnames(mtx) <- pedind$snp_id
-popx <- pop(dat)
-
-xval <- xvalDapc(mtx, popx, n.pca.max = 300, training.set = 0.9,
-result = "groupMean", center = TRUE, scale = TRUE,
-n.pca = NULL, n.rep = 30, xval.plot = TRUE)
-
-xx <- read.delim("../plink.eigenval", sep = " ", header = F)
-yy <- read.delim("../plink.eigenvec", sep = " ", header = F)
-
-# read in the eigenvectors, produced in PLINK
-eigenvec <- read.table('../plink.eigenvec', header = FALSE, skip=0, sep = ' ')
-eigenvec %<>% dplyr::group_by(V1, V2) %>% 
-  dplyr::mutate(sample_id = paste(c(V1, V2), collapse = "_"))
-eigenvec %<>% dplyr::left_join(labels, by = "sample_id")
-
-pops <- as.factor(as.character(unlist(labels[labeled_inds, "ancestry"])))
-cols <-  RColorBrewer::brewer.pal(6, "Set2")
-
-round(xx[1,1]/sum(xx)*100,digits=2)
-
-scree <- data.frame(PC = seq(20),
-                    eig = (round(xx[seq(20),1]/sum(xx)*100,digits=2)))
-ggplot2::ggplot(scree, aes(x = PC, y = eig)) + geom_point(stat = "identity")
-
-for (i in seq(20)) {
-  message(round(xx[i,1]/sum(xx)*100,digits=2))
-}
-
-project.pca <- eigenvec
-summary(project.pca)
-
-ggplot2::ggplot(project.pca, aes(x = V3, y = V4, color = ancestry)) + 
-  geom_point()
+for (i in seq(3)) {
+  pca_matrix[i,i] <- ggally_text(
+    paste0("PC", i," (", round(pca_pve$pve[i], 3), "%\nof variance\nexplained)"),
+    mapping = ggplot2::aes(size = 1), color = I("black")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.ticks = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank())
+  }
+pca_matrix
 ```
