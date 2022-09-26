@@ -1,68 +1,100 @@
 ---
 title: "Ancestry classifier with principal components"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
-0. Pre-processing
+## Approximately 2% of 2.2 million variants were filtered for analysis
 
-Initial: 2,203,614
-SNPs: 1,372,115
-Common: 129,812
-Call rate: 85195
-R^2 < 0.1, no callrate filter (bcftools): 66,142
+The following criteria were applied to filter the original VCF to 42,427
+variants:
 
-```{bash, eval = F}
-INFILE=data/acs_mini_project.vcf.gz ; \
+-   SNPs only
+-   Minor allele frequency greater than 1%
+-   High call rate such that the variant is reported in at least 95% of
+    samples
+-   LD-pruned where r^2^ \< 0.1
+-   Correctly stranded compared to reference genome--if unresolved with
+    VCF QC tools then excluded
+
+Afterwards, the data was converted into PLINK format then read into R.
+
+```{bash echo=TRUE}
+INFILE=data/acs_mini_project ; \
 OUTFILE=data/acs_mini_project.2plink
 
-bcftools view -m2 -M2 -v snps ${INFILE}.vcf.gz | bcftools +prune -l 0.1 | bcftools +fill-tags | \ bcftools filter -e 'AF < 0.01' | bcftools filter -e 'F_MISSING >= 0.05' | bgzip -c > \ ${OUTFILE}.vcf.gz
+bcftools view -m2 -M2 -v snps ${INFILE}.vcf.gz | bcftools +prune -l 0.1 | bcftools +fill-tags | \ 
+bcftools filter -e 'AF < 0.01' | bcftools filter -e 'F_MISSING >= 0.05' | bgzip -c > \ 
+${INFILE}.filtered.vcf.gz
 
-grep "^sample_id\|NA" data/acs_mini_project_labels.txt > data/unlabeled_inds.txt
+bcftools +fixref data/${INFILE}.vcf.gz -- -d -f data/GRCh37.fa.gz -i All_20151104.vcf.g | \
+bgzip -c > ${OUTFILE}.fixref.vcf.gz
 
-plink --vcf data/${INFILE}.vcf.gz --make-bed --snps-only --remove \ data/unlabeled_inds.txt --out ${OUTFILE}
-
-# create unlabeled
-
-
+plink --vcf data/${INFILE}.fixref.vcf.gz --make-bed --snps-only --out ${OUTFILE}
 ```
 
-1. Principal component values for the call set.
+Once read into R, the genotype table was checked for samples with high
+proportion of missing data. 107 samples with at least 10% missing data
+were removed from the analysis. This is a 5% loss from the original 1966
+samples. Variants with missing values were also removed, resulting in an
+approximately 20% reduction from original down to 34,655 variants.
+Although the data loss may be noticeable enough to affect downstream
+analysis, the filtering done beforehand ensures that the retained data
+is still of high quality.
 
-```{r setup, eval = F}
+```{r setup}
+knitr::opts_chunk$set(cache = TRUE, echo = TRUE)
 library(tidyverse)
 library(magrittr)
 library(DT)
 library(adegenet)
 library(GGally)
 library(RColorBrewer)
-library(ggforce)
 library(ggnewscale)
-
-labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
-labeled_inds <- grep("", labels$ancestry)
 
 fname <- "../data/acs_mini_project.2plink"
 dat <- adegenet::read.PLINK(paste0(fname,".raw"))
 adegenet::indNames(dat) <- paste0("TGG_", adegenet::indNames(dat))
+
+labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
 adegenet::pop(dat) <- labels$ancestry %>% unlist() %>% as.factor()
 
 gt <- as.matrix(dat)
 
-missing_vrnt <- apply(gt_2, 2, function(x) {sum(is.na(x))/ncol(gt) * 100})
-missing_smpl <- apply(gt_2, 1, function(x) {sum(is.na(x))/nrow(gt) * 100})
-
-# > miss_smpl_idx
-#  TGG_102  TGG_231  TGG_441  TGG_765  TGG_971 TGG_1563 TGG_1850 
-#       36       94      169      274      331      534      633 
-
+missing_smpl <- apply(gt, 1, function(x) {sum(is.na(x))/nrow(gt) * 100})
 miss_smpl_idx <- which(missing_smpl > 10)
-gt <- gt[-miss_smpl_idx,]
-gt <- apply(gt, 2, function(x) {(x - mean(x, na.rm = T)) / sd(x, na.rm = T)})
-gt <- t(gt) %>% na.omit() %>% t()
+gt <- gt[-miss_smpl_idx,] %>% t() %>% na.omit() %>% t()
 
-labeled_idx <- which(rownames(gt) %in% unlist(labels[labeled_inds, "sample_id"]))
+labels <- labels[-miss_smpl_idx,]
+lbl_idx <- which(!is.na(labels$ancestry))
+```
 
-gt_pca <- prcomp(x = gt[labeled_idx,], center = F, scale. = F)
+## First 5 principal components capture 15% of variance explained
+
+The genotypes of labeled samples were used to generate principal
+components used to predict ancestry of unlabeled samples. After
+excluding the unlabeled samples, the remaining genotypes were randomly
+sampled into training and test sets, composed of 80% and 20% of all
+labeled samples respectively. The training set of 869 labeled samples
+was mean-centered to 0 to let samples be more comparable to each other.
+Data were not scaled by standard deviation since all values represent
+the same measure of 0-2 alternate alleles called for a given variant.
+The centered training set was then used for PCA.
+
+```{r echo=TRUE, scree, fig.align='center'}
+set.seed(63549)
+
+lbl_gt <- gt[lbl_idx, ]
+trn_idx <- sample(1:nrow(lbl_gt), nrow(lbl_gt) * 0.8, replace = F)
+trn_gt <- lbl_gt[trn_idx,] %>% 
+  apply(2, function(x) {x - mean(x, na.rm = T)})
+
+gt_pca <- prcomp(x = trn_gt, center = F, scale. = F)
 
 pca_pve <- data.frame(
   pc = seq(length(gt_pca$sdev)),
@@ -70,118 +102,173 @@ pca_pve <- data.frame(
   cumsum_pve = cumsum(gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100)
   )
 
-ggplot2::ggplot(pca_pve, aes(x = pc, y = pve)) +
-  geom_point(stat = "identity") + xlim(0, 30)
-ggplot2::ggplot(pca_pve, aes(x = pc, y = cumsum_pve)) +
-  geom_point(stat = "identity")
+screeplot(gt_pca)
 ```
 
-Applying predicted model.
+The scree plot of the computed PCs indicates that most of the observed
+variance is captured by the first 5 principal components, cumulatively
+explaining 15% of variance explained. Only the first 5 were chosen due
+to the diminishing proportion values. Also, only the first 3 eigenvalues
+are greater than 1, indicating that very little variability can be
+described with increased number of PCs.
 
-```{r}
+The whole genotype table, including the unlabeled and test samples, were
+then projected to the eigenvectors of the PCA analysis. The PC values
+across the first 5 eigenvectors for all samples in the analysis are
+shown in the table below.
+
+```{r echo=TRUE}
 evec <- predict(gt_pca, gt) %>%
   as.data.frame() %>% 
   tibble::rownames_to_column("sample_id") %>% 
   dplyr::left_join(labels, by = "sample_id") %>% 
   dplyr::relocate(sample_id, ancestry) %>% 
-  dplyr::select(sample_id:PC30)
+  dplyr::select(sample_id:PC5)
 
 DT::datatable(evec, options = list(scrollX = T))
 ```
 
-2. Projecting model to samples with missing labels.
+## KNN model was trained to predict ancestry with 3% error rate and k = 20
 
+K-nearest neighbors (KNN) was chosen using the first 5 principal
+components as features to predict most likely ancestry of a given
+sample. KNN was chosen because it is a non-parametric method and no
+assumptions were made about the distribution of the PC values. Because
+the reported ancestries of the labeled samples are known, the model can
+be evaluated by measuring the proportion of correctly predicted labels
+with increasing numbers of k. Once there is no longer an appreciable
+change in model accuracy then an appropriate value of k to use for the
+unlabeled samples can be selected.
 
-```{r model, eval = F}
-set.seed(63549)
-evec_trn <- evec %>% dplyr::filter(!is.na(ancestry)) %>% tibble::column_to_rownames("sample_id")
+```{r echo=TRUE, knn, fig.align='center'}
 
-idx <- sample(1:nrow(evec_trn), nrow(evec_trn) * 0.8, replace = F)
-trn_dat <- evec_trn[idx, c(-1)]
-trn_pop <- as.factor(evec_trn[idx, c(1)])
-tst_dat <- evec_trn[-idx, c(-1)]
-tst_pop <- as.factor(evec_trn[-idx, c(1)])
+evec_lbl <- evec %>% tibble::column_to_rownames("sample_id") %>% dplyr::filter(!is.na(ancestry))
+evec_trn <- evec_lbl[trn_idx,-1]
+evec_tst <- evec_lbl[-trn_idx, -1]
+trn_pop <- as.factor(evec_lbl[trn_idx,1])
+tst_pop <- as.factor(evec_lbl[-trn_idx,1])
 
-sqrt_trn_len <- round(sqrt(nrow(trn_dat)))
-k_times <- 100
+k_times <- 30
 
 trn_err <- rep(0, k_times)
 tst_err <- rep(0, k_times)
 
 for(k in seq(k_times)){
-  knn_trn <- class::knn(train = trn_dat, test = trn_dat, cl = trn_pop, k = k, prob = F)
+  knn_trn <- class::knn(train = evec_trn, test = evec_trn, cl = trn_pop, k = k, prob = F)
   trn_err[k] = sum(knn_trn != trn_pop)/length(trn_pop)
-  knn_tst <- class::knn(train = trn_dat, test = tst_dat, cl = trn_pop, k = k, prob = F)
+  knn_tst <- class::knn(train = evec_trn, test = evec_tst, cl = trn_pop, k = k, prob = F)
   tst_err[k] = sum(knn_tst != tst_pop)/length(tst_pop)
   }
 
-knn_df <- data.frame(k = seq(k_times), trn_err = trn_err, tst_err = tst_err)
-ggplot2::ggplot(knn_df, ggplot2::aes(x = k)) +
-  ggplot2::geom_line(aes(y = trn_err * 100), color = "red") +
-  ggplot2::geom_line(aes(y = tst_err * 100), color = "blue") +
-  ggplot2::xlab("k") +ggplot2::ylab("Error rate (%)")
+knn_df <- data.frame(k = seq(k_times), trn_err = trn_err * 100, tst_err = tst_err * 100) %>% 
+  tidyr::pivot_longer(cols = c(trn_err, tst_err), names_to = "grouping", values_to = "prop")
 
+ggplot2::ggplot(knn_df, ggplot2::aes(x = k, y = prop, color = grouping)) +
+  geom_line() +
+  ggplot2::xlab("k") +ggplot2::ylab("Error rate (%)") +
+  theme(legend.title = element_blank()) +
+  scale_color_manual(name = "val", 
+                     labels=c("Training", "Test"), 
+                     values = brewer.pal(3, "Dark2")[1:2])
 ```
 
-Choose most accurate.
+The selected number for the maximum number of k is 30, the square root
+of the number of samples in the training set. Starting from k = 1, the
+training set was used to predict ancestries of samples from both
+training and test sets. The error rate appears to increase very little
+around k = 20, which was later used for predicting the unlabeled
+samples.
 
-```{r}
-unl_dat <- evec %>% dplyr::filter(is.na(ancestry)) %>% 
-  tibble::column_to_rownames("sample_id") %>% 
-  dplyr::select(-ancestry)
+The table of all samples and their ancestries, either predicted or
+already labeled, can be found below.
 
-pred_unl <- class::knn(train = trn_dat, test = unl_dat, cl = trn_pop, k = 50, prob = F)
+```{r echo=TRUE, predict, fig.align='center'}
+evec_unl <- evec %>% tibble::column_to_rownames("sample_id") %>% 
+  dplyr::filter(is.na(ancestry)) %>% dplyr::select(-ancestry)
+prd_unl <- class::knn(train = evec_trn, test = evec_unl, cl = trn_pop, k = 20, prob = F)
 
-evec[-labeled_idx,"ancestry"] <- as.character(evec_unl)
+evec[is.na(evec$ancestry),"ancestry"] <- as.character(prd_unl)
 evec_df <- evec %>% 
-  dplyr::mutate(labeled = as.character(
-    sample_id %in% unlist(labels[labeled_inds, "sample_id"]))) %>% 
-  dplyr::mutate(labeled = tolower(labeled)) %>% 
-  dplyr::relocate(sample_id, ancestry, labeled)
-levels(evec_df$labeled) <- c("true", "false")
+  dplyr::mutate(grouping = as.character(sample_id %in% rownames(lbl_gt))) %>% 
+  dplyr::mutate(grouping = tolower(grouping)) %>% 
+  dplyr::relocate(sample_id, ancestry, grouping)
+
+evec_df$grouping[evec_df$grouping == "true"] <- "labeled"
+evec_df$grouping[evec_df$grouping == "false"] <- "predicted"
+levels(evec_df$grouping) <- c("labeled", "predicted")
 
 DT::datatable(evec_df, options = list(scrollX = T))
 ```
 
-3. Distribution of PC values calc'd by smartpca of all samples, colored by ancestry and shape
-by label vs unlabeled
+## Distributions of PC values shared between labeled and predicted samples
 
-```{r}
+The PC values for each sample across the first 5 principal components
+are shown in pairwise fashion below. Each sample is colored by their
+reported ancestry. In addition, a second set of plots colored by whether
+a given sample was labeled in the original dataset was shown as if it
+can be overlaid on the population-level PCA.
 
-pca_df <- evec_df %>% dplyr::select(sample_id:PC3) %>% 
-  tidyr::pivot_longer(c(ancestry, labeled), names_to = "grp", values_to = "val")
-levels(pca_df$grp) = c("ancestry", "labeled")
+The labels for each principal component are positioned to correspond to
+the axis they're plotted in. For example, to see the ancestry-colored
+plot for "PC2 vs PC1", start at the second row at the "PC2" label along
+the y-axis at the right of plot then move to the 1st column, where "PC1"
+is labeled on the x-axis at the bottom of the plot. The corresponding
+plot for labeled vs unlabeled samples can be found by following the
+inverse of the previous step or moving diagonally from the first plot.
+
+```{r echo=TRUE, all_pcs, fig.align='center'}
+pca_df <- evec_df %>% 
+  tidyr::pivot_longer(c(ancestry, grouping), names_to = "grp", values_to = "val")
+levels(pca_df$grp) = c("ancestry", "grouping")
 
 plot_legend <- ggplot2::ggplot(subset(pca_df, grp == "ancestry"), aes(x = PC1, y = PC2)) +
   geom_jitter(aes(color = val)) + 
   scale_color_manual(values = brewer.pal(6, "Set2"), name = "ancestry") +
   ggnewscale::new_scale_color() +
-  geom_jitter(data = subset(pca_df, grp == "labeled"), aes(color = val)) +
-  scale_color_manual(values = brewer.pal(3, "Dark2")[-3], name = "labeled")
+  geom_jitter(data = subset(pca_df, grp == "grouping"), aes(color = val)) +
+  scale_color_manual(values = brewer.pal(3, "Dark2")[1:2], name = "grouping")
 
 pca_plot <- function(pc_a, pc_b, grp_by) {
   mplot <- ggplot2::ggplot(subset(pca_df, grp == grp_by), aes_string(x = pc_a, y = pc_b)) +
-    geom_jitter(aes(color = val)) + theme(legend.position = "none") + xlim(-100, 100) +
-    ylim(-100, 100)
+    geom_jitter(aes(color = val)) + theme(legend.position = "none") + xlim(-40, 40) +
+    ylim(-40, 40)
+  if (grp_by == "ancestry") {
+    mplot <- mplot + scale_color_manual(values = brewer.pal(6, "Set2"), name = grp_by)
+    } else if (grp_by == "grouping") {
+    mplot <- mplot + scale_color_manual(values = brewer.pal(3, "Dark2")[1:2], name = "grouping")
+    }
   return(mplot)
   }
 
-pca_matrix <- ggpairs(evec_df, columns = c("PC1", "PC2", "PC3"),
+pca_matrix <- ggpairs(pca_df, columns = c("PC1", "PC2", "PC3", "PC4", "PC5"),
                     upper = NULL, lower = NULL, diag = NULL, 
-                    legend = GGally::grab_legend(plot_legend))
-pca_matrix[2,1] <- pca_plot("PC1", "PC2", "ancestry")
-pca_matrix[3,1] <- pca_plot("PC1", "PC3", "ancestry")
-pca_matrix[3,2] <- pca_plot("PC2", "PC3", "ancestry")
-pca_matrix[1,2] <- pca_plot("PC1", "PC2", "labeled")
-pca_matrix[1,3] <- pca_plot("PC1", "PC3", "labeled")
-pca_matrix[2,3] <- pca_plot("PC2", "PC3", "labeled")
+                    legend = GGally::grab_legend(plot_legend),
+                    progress = F, switch = "x")
 
-for (i in seq(3)) {
+for (j in seq(4)) {
+  for (i in seq(2, 5)) {
+    if (i > j) {
+      pca_matrix[i,j] <- pca_plot(paste0("PC", j), paste0("PC", i), "ancestry")
+      pca_matrix[j,i] <- pca_plot(paste0("PC", j), paste0("PC", i), "grouping")
+    }}
+  }
+
+for (i in seq(5)) {
   pca_matrix[i,i] <- ggally_text(
     paste0("PC", i," (", round(pca_pve$pve[i], 3), "%\nof variance\nexplained)"),
     mapping = ggplot2::aes(size = 1), color = I("black")) +
     theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-          axis.ticks = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank())
-  }
+          axis.ticks = element_blank(), axis.ticks.y = element_blank(), 
+          axis.text.y = element_blank())
+}
+
 pca_matrix
 ```
+
+The labels for each principal component are positioned to correspond to
+the axis they're plotted in. For example, to see the ancestry-colored
+plot for "PC2 vs PC1", start at the second row at the "PC2" label along
+the y-axis at the right of plot then move to the 1st column, where "PC1"
+is labeled on the x-axis at the bottom of the plot. The corresponding
+plot for labeled vs unlabeled samples can be found by following the
+inverse of the previous step or moving diagonally from the first plot.
