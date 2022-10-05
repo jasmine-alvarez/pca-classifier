@@ -87,6 +87,56 @@ the same measure of 0-2 alternate alleles called for a given variant.
 The centered training set was then used for PCA.
 
 ```{r echo=TRUE, scree, fig.align='center'}
+
+# check labeled gt
+lbl_gt %<>% apply(2, function(x) {x - mean(x, na.rm = T)})
+lbl_pca <- prcomp(x = lbl_gt, center = F, scale. = F)
+
+lbl_pve <- data.frame(
+  pc = seq(length(lbl_pca$sdev)),
+  pve = lbl_pca$sdev^2 / sum(lbl_pca$sdev^2) * 100,
+  cumsum_pve = cumsum(lbl_pca$sdev^2 / sum(lbl_pca$sdev^2) * 100)
+  ) %>% dplyr::mutate(pc = as.integer(pc))
+
+
+ggplot2::ggplot(dplyr::filter(lbl_pve, pc <= 10), aes(x = pc, y = pve)) +
+  geom_line(stat = "identity") +
+  scale_x_continuous(breaks = c(0, seq(10))) + ylab("% variance explained (PVE)") +
+  xlab("Principal component (PC)") + ylim(0, 10) +
+  ggplot2::theme(text = element_text(size = 20))
+mywidth <- 2250
+ggplot2::ggsave("output/00_labeled_scree.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
+```
+
+```{r}
+lbl_evec <- predict(lbl_pca, lbl_gt) %>%
+  as.data.frame() %>% 
+  tibble::rownames_to_column("sample_id") %>% 
+  dplyr::left_join(labels, by = "sample_id") %>% 
+  dplyr::relocate(sample_id, ancestry)
+
+ggplot2::ggplot(lbl_evec, ggplot2::aes(x = PC1, y = PC2)) +
+  geom_jitter(aes(color = ancestry)) + scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
+  ggplot2::xlab(paste0("PC1 (", round(lbl_pve$pve[1], 3), "% PVE)")) + 
+  ggplot2::ylab(paste0("PC2 (", round(lbl_pve$pve[2], 3), "% PVE)")) +
+  ggplot2::theme(text = element_text(size = 20), legend.text = element_text(size = 20))
+
+mywidth <- 2250
+ggplot2::ggsave("output/00_labeled_only_pca.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
+
+ggplot2::ggplot(lbl_evec) +
+  geom_density(aes(x = PC1, color = ancestry)) + 
+  scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
+  ggplot2::xlab("Eigenvalues") + ylab("Density") +
+  ggplot2::theme(text = element_text(size = 20), legend.text = element_text(size = 20), 
+                 legend.position = "none")
+ggplot2::ggsave("output/00_labeled_only_var.tiff", device = "tiff", units = "px", 
+                width = 1600, height = 1600 * 0.75, dpi = "print")
+```
+
+```{r continue with pca}
 set.seed(63549)
 
 lbl_gt <- gt[lbl_idx, ]
@@ -101,6 +151,17 @@ pca_pve <- data.frame(
   pve = gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100,
   cumsum_pve = cumsum(gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100)
   )
+
+evec <- predict(gt_pca, gt) %>%
+  as.data.frame() %>% 
+  tibble::rownames_to_column("sample_id") %>% 
+  dplyr::left_join(labels, by = "sample_id") %>% 
+  dplyr::relocate(sample_id, ancestry)
+
+ggplot2::ggplot(lbl_evec, ggplot2::aes(x = PC1, y = PC2)) +
+  geom_jitter(aes(color = ancestry)) + scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
+  ggplot2::xlab(paste0("PC1 (", round(lbl_pve$pve[1], 3), "% of variance explained)")) + 
+  ggplot2::ylab(paste0("PC2 (", round(lbl_pve$pve[2], 3), "% of variance explained)"))
 
 scree_plot <- screeplot(gt_pca)
 save(scree_plot, file = "output/01_scree_plot.png")
@@ -173,7 +234,7 @@ ggplot2::ggplot(knn_df, ggplot2::aes(x = k, y = prop, color = grouping)) +
   scale_color_manual(name = "val", 
                      labels=c("Training", "Test"), 
                      values = brewer.pal(3, "Dark2")[1:2])
-ggsave("output/02_knn__plot.png", device = "png", height = 9, width = 12)
+ggsave("output/02_knn_plot.png", device = "png", height = 6, width = 8)
 
 ```
 
@@ -270,7 +331,7 @@ for (i in seq(5)) {
 }
 
 pca_matrix
-ggsave("output/03_pca_matrix.png", height = 9, width = 12, device = "png")
+ggsave("output/03_pca_matrix.png", height = 6, width = 8, device = "png")
 ```
 
 The labels for each principal component are positioned to correspond to
