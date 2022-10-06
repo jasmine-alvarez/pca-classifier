@@ -32,10 +32,7 @@ bcftools view -m2 -M2 -v snps ${INFILE}.vcf.gz | bcftools +prune -l 0.1 | bcftoo
 bcftools filter -e 'AF < 0.01' | bcftools filter -e 'F_MISSING >= 0.05' | bgzip -c > \ 
 ${INFILE}.filtered.vcf.gz
 
-bcftools +fixref data/${INFILE}.vcf.gz -- -d -f data/GRCh37.fa.gz -i All_20151104.vcf.g | \
-bgzip -c > ${OUTFILE}.fixref.vcf.gz
-
-plink --vcf data/${INFILE}.fixref.vcf.gz --make-bed --snps-only --out ${OUTFILE}
+plink --vcf data/${INFILE}.vcf.gz --make-bed --snps-only --out ${OUTFILE}
 ```
 
 Once read into R, the genotype table was checked for samples with high
@@ -57,24 +54,57 @@ library(GGally)
 library(RColorBrewer)
 library(ggnewscale)
 
+source(file = "../code/00_helper.R")
+
 fname <- "../data/acs_mini_project.2plink"
 dat <- adegenet::read.PLINK(paste0(fname,".raw"))
 adegenet::indNames(dat) <- paste0("TGG_", adegenet::indNames(dat))
-
 labels <- readr::read_delim("../data/acs_mini_project_labels.txt")
 adegenet::pop(dat) <- labels$ancestry %>% unlist() %>% as.factor()
 
 gt <- as.matrix(dat)
 
-missing_smpl <- apply(gt, 1, function(x) {sum(is.na(x))/nrow(gt) * 100})
-miss_smpl_idx <- which(missing_smpl > 10)
+missing_smpl <- apply(gt, 1, function(x) {sum(is.na(x))/nrow(gt)})
+miss_smpl_idx <- which(missing_smpl > 0.1)
 gt <- gt[-miss_smpl_idx,] %>% t() %>% na.omit() %>% t()
 
 labels <- labels[-miss_smpl_idx,]
 lbl_idx <- which(!is.na(labels$ancestry))
+lbl_gt <- gt[lbl_idx, ]
+
+set.seed(63549)
+
+trn_idx <- sample(1:nrow(lbl_gt), nrow(lbl_gt) * 0.8, replace = F)
+trn_data <- lbl_gt[trn_idx, ]
+
+trn_data %<>% apply(2, function(x) {x - mean(x, na.rm = T)})
+
+trn_pca <- prcomp(trn_data, center = F, scale. = F)
+
+trn_pve <- data.frame(
+  pc = seq(length(trn_pca$sdev)),
+  pve = trn_pca$sdev^2 / sum(trn_pca$sdev^2),
+  cumsum_pve = cumsum(trn_pca$sdev^2 / sum(trn_pca$sdev^2)))
 ```
 
-## 01. First 5 principal components capture 15% of variance explained
+Make plot.
+
+```{r}
+ggplot2::ggplot(dplyr::filter(trn_pve, pc <= 10), aes(x = pc, y = pve * 100)) +
+  geom_line(stat = "identity") +
+  scale_x_continuous(breaks = c(0, seq(10))) + 
+  scale_y_continuous(breaks = c(0, seq(1, 10, 2))) +
+  ylab("Proportion of variance \nexplained (%)") +
+  xlab("Principal component (PC)") + ylim(0, 10) +
+  ggplot2::theme(text = element_text(size = 20))
+
+mywidth <- 2250
+ggplot2::ggsave("../output/00_labeled_scree.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
+
+```
+
+## 01. First 3 principal components capture 46% of variance explained
 
 The genotypes of labeled samples were used to generate principal
 components used to predict ancestry of unlabeled samples. After
@@ -86,85 +116,38 @@ Data were not scaled by standard deviation since all values represent
 the same measure of 0-2 alternate alleles called for a given variant.
 The centered training set was then used for PCA.
 
-```{r echo=TRUE, scree, fig.align='center'}
-
-# check labeled gt
-lbl_gt %<>% apply(2, function(x) {x - mean(x, na.rm = T)})
-lbl_pca <- prcomp(x = lbl_gt, center = F, scale. = F)
-
-lbl_pve <- data.frame(
-  pc = seq(length(lbl_pca$sdev)),
-  pve = lbl_pca$sdev^2 / sum(lbl_pca$sdev^2) * 100,
-  cumsum_pve = cumsum(lbl_pca$sdev^2 / sum(lbl_pca$sdev^2) * 100)
-  ) %>% dplyr::mutate(pc = as.integer(pc))
-
-
-ggplot2::ggplot(dplyr::filter(lbl_pve, pc <= 10), aes(x = pc, y = pve)) +
-  geom_line(stat = "identity") +
-  scale_x_continuous(breaks = c(0, seq(10))) + ylab("% variance explained (PVE)") +
-  xlab("Principal component (PC)") + ylim(0, 10) +
-  ggplot2::theme(text = element_text(size = 20))
-mywidth <- 2250
-ggplot2::ggsave("output/00_labeled_scree.tiff", device = "tiff", units = "px", 
-                width = mywidth, height = mywidth * 0.75, dpi = "print")
-```
-
 ```{r}
-lbl_evec <- predict(lbl_pca, lbl_gt) %>%
-  as.data.frame() %>% 
+retx <- as.data.frame(trn_pca$x) %>% 
   tibble::rownames_to_column("sample_id") %>% 
   dplyr::left_join(labels, by = "sample_id") %>% 
-  dplyr::relocate(sample_id, ancestry)
+  dplyr::relocate(sample_id, ancestry) %>% 
+  dplyr::select(sample_id:PC3)
 
-ggplot2::ggplot(lbl_evec, ggplot2::aes(x = PC1, y = PC2)) +
-  geom_jitter(aes(color = ancestry)) + scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
-  ggplot2::xlab(paste0("PC1 (", round(lbl_pve$pve[1], 3), "% PVE)")) + 
-  ggplot2::ylab(paste0("PC2 (", round(lbl_pve$pve[2], 3), "% PVE)")) +
-  ggplot2::theme(text = element_text(size = 20), legend.text = element_text(size = 20))
+pca_matrix <- ggpairs(retx, columns = paste0("PC", seq(3)),
+                    upper = NULL, lower = NULL, diag = NULL, 
+                    progress = F, legend = GGally::grab_legend(trn_plot(1, 2)),
+                    switch = "both")
 
-mywidth <- 2250
-ggplot2::ggsave("output/00_labeled_only_pca.tiff", device = "tiff", units = "px", 
+for (j in c(1,2)) {
+  for (i in c(2,3)) {
+    if (i > j) {
+      pca_matrix[i, j] <- trn_plot(j, i)
+      }
+  }
+}
+
+for (i in seq(3)) {
+  pca_matrix[i,i] <- ggally_text(
+    paste0("PC", i," (", round(trn_pve$pve[i], 3) * 100, "%\nof variance\nexplained)"),
+    mapping = ggplot2::aes(size = 1), color = I("black")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.ticks = element_blank(), axis.ticks.y = element_blank(), 
+          axis.text.y = element_blank())
+}
+
+pca_matrix
+ggplot2::ggsave("output/00_labeled_PCA.tiff", device = "tiff", units = "px", 
                 width = mywidth, height = mywidth * 0.75, dpi = "print")
-
-ggplot2::ggplot(lbl_evec) +
-  geom_density(aes(x = PC1, color = ancestry)) + 
-  scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
-  ggplot2::xlab("Eigenvalues") + ylab("Density") +
-  ggplot2::theme(text = element_text(size = 20), legend.text = element_text(size = 20), 
-                 legend.position = "none")
-ggplot2::ggsave("output/00_labeled_only_var.tiff", device = "tiff", units = "px", 
-                width = 1600, height = 1600 * 0.75, dpi = "print")
-```
-
-```{r continue with pca}
-set.seed(63549)
-
-lbl_gt <- gt[lbl_idx, ]
-trn_idx <- sample(1:nrow(lbl_gt), nrow(lbl_gt) * 0.8, replace = F)
-trn_gt <- lbl_gt[trn_idx,] %>% 
-  apply(2, function(x) {x - mean(x, na.rm = T)})
-
-gt_pca <- prcomp(x = trn_gt, center = F, scale. = F)
-
-pca_pve <- data.frame(
-  pc = seq(length(gt_pca$sdev)),
-  pve = gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100,
-  cumsum_pve = cumsum(gt_pca$sdev^2 / sum(gt_pca$sdev^2) * 100)
-  )
-
-evec <- predict(gt_pca, gt) %>%
-  as.data.frame() %>% 
-  tibble::rownames_to_column("sample_id") %>% 
-  dplyr::left_join(labels, by = "sample_id") %>% 
-  dplyr::relocate(sample_id, ancestry)
-
-ggplot2::ggplot(lbl_evec, ggplot2::aes(x = PC1, y = PC2)) +
-  geom_jitter(aes(color = ancestry)) + scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
-  ggplot2::xlab(paste0("PC1 (", round(lbl_pve$pve[1], 3), "% of variance explained)")) + 
-  ggplot2::ylab(paste0("PC2 (", round(lbl_pve$pve[2], 3), "% of variance explained)"))
-
-scree_plot <- screeplot(gt_pca)
-save(scree_plot, file = "output/01_scree_plot.png")
 ```
 
 The scree plot `01_scree_plot.png` of the computed PCs indicates that most of the observed
@@ -177,17 +160,6 @@ described with increased number of PCs.
 The whole genotype table, including the unlabeled and test samples, were
 then projected to the eigenvectors of the PCA analysis. The PC values
 for all samples can be found in `01_gt_pca_evec.txt`.
-
-```{r echo=TRUE}
-evec <- predict(gt_pca, gt) %>%
-  as.data.frame() %>% 
-  tibble::rownames_to_column("sample_id") %>% 
-  dplyr::left_join(labels, by = "sample_id") %>% 
-  dplyr::relocate(sample_id, ancestry)
-
-# DT::datatable(evec, options = list(scrollX = T))
-write.table(evec, "output/01_gt_pca_evec.txt", col.names = T, row.names = F, quote = F, sep = "\t")
-```
 
 ## 02. KNN model was trained to predict ancestry with 3% error rate and k = 20
 
@@ -202,17 +174,28 @@ change in model accuracy then an appropriate value of k to use for the
 unlabeled samples can be selected.
 
 ```{r echo=TRUE, knn, fig.align='center'}
+projected_retx <- predict(trn_pca, gt) %>%
+  as.data.frame() %>% 
+  tibble::rownames_to_column("sample_id") %>% 
+  dplyr::left_join(labels, by = "sample_id") %>% 
+  dplyr::relocate(sample_id, ancestry)
 
-evec_lbl <- evec %>% 
-  dplyr::select(sample_id:PC5) %>% 
+evec_lbl <- projected_retx %>% 
+  dplyr::select(sample_id:PC3) %>% 
   tibble::column_to_rownames("sample_id") %>% 
   dplyr::filter(!is.na(ancestry))
+
+evec_unl <- projected_retx %>% 
+  dplyr::select(sample_id:PC3) %>% 
+  tibble::column_to_rownames("sample_id") %>% 
+  dplyr::filter(is.na(ancestry))
+
 evec_trn <- evec_lbl[trn_idx,-1]
 evec_tst <- evec_lbl[-trn_idx, -1]
 trn_pop <- as.factor(evec_lbl[trn_idx,1])
 tst_pop <- as.factor(evec_lbl[-trn_idx,1])
 
-k_times <- 30
+k_times <- 40
 
 trn_err <- rep(0, k_times)
 tst_err <- rep(0, k_times)
@@ -234,8 +217,11 @@ ggplot2::ggplot(knn_df, ggplot2::aes(x = k, y = prop, color = grouping)) +
   scale_color_manual(name = "val", 
                      labels=c("Training", "Test"), 
                      values = brewer.pal(3, "Dark2")[1:2])
-ggsave("output/02_knn_plot.png", device = "png", height = 6, width = 8)
 
+ggplot2::ggsave("output/02_KNN_training.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
+
+conf <- confusionMatrix(data = knn_tst, reference = tst_pop)
 ```
 
 The selected number for the maximum number of k is 30, the square root
