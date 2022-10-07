@@ -44,7 +44,7 @@ Although the data loss may be noticeable enough to affect downstream
 analysis, the filtering done beforehand ensures that the retained data
 is still of high quality.
 
-```{r setup}
+```{r setup, eval = FALSE}
 knitr::opts_chunk$set(cache = TRUE, echo = TRUE)
 library(tidyverse)
 library(magrittr)
@@ -53,6 +53,7 @@ library(adegenet)
 library(GGally)
 library(RColorBrewer)
 library(ggnewscale)
+library(caret)
 
 source(file = "../code/00_helper.R")
 
@@ -89,7 +90,7 @@ trn_pve <- data.frame(
 
 Make plot.
 
-```{r}
+```{r, eval = FALSE}
 ggplot2::ggplot(dplyr::filter(trn_pve, pc <= 10), aes(x = pc, y = pve * 100)) +
   geom_line(stat = "identity") +
   scale_x_continuous(breaks = c(0, seq(10))) + 
@@ -116,7 +117,7 @@ Data were not scaled by standard deviation since all values represent
 the same measure of 0-2 alternate alleles called for a given variant.
 The centered training set was then used for PCA.
 
-```{r}
+```{r, eval = FALSE}
 retx <- as.data.frame(trn_pca$x) %>% 
   tibble::rownames_to_column("sample_id") %>% 
   dplyr::left_join(labels, by = "sample_id") %>% 
@@ -195,33 +196,90 @@ evec_tst <- evec_lbl[-trn_idx, -1]
 trn_pop <- as.factor(evec_lbl[trn_idx,1])
 tst_pop <- as.factor(evec_lbl[-trn_idx,1])
 
-k_times <- 40
+set.seed(63549)
+k_times <- 30
 
 trn_err <- rep(0, k_times)
 tst_err <- rep(0, k_times)
 
+list_trn_strt <- list()
+list_tst_strt <- list()
+
 for(k in seq(k_times)){
   knn_trn <- class::knn(train = evec_trn, test = evec_trn, cl = trn_pop, k = k, prob = F)
-  trn_err[k] = sum(knn_trn != trn_pop)/length(trn_pop)
+  conf_trn <- confusionMatrix(data = knn_trn, reference = trn_pop)
+  trn_err[k] = 1 - conf_trn$overall["Accuracy"]
+  list_trn_strt[[k]] <- data.frame(
+    k = k, afr_err = 1 - conf_trn$byClass["Class: afr",]["Balanced Accuracy"], 
+    amr_err = 1 - conf_trn$byClass["Class: amr",]["Balanced Accuracy"], 
+    eas_err = 1 - conf_trn$byClass["Class: eas",]["Balanced Accuracy"], 
+    fin_err = 1 - conf_trn$byClass["Class: fin",]["Balanced Accuracy"], 
+    nfe_err = 1 - conf_trn$byClass["Class: nfe",]["Balanced Accuracy"], 
+    sas_err = 1 - conf_trn$byClass["Class: sas",]["Balanced Accuracy"]
+    )
+
   knn_tst <- class::knn(train = evec_trn, test = evec_tst, cl = trn_pop, k = k, prob = F)
-  tst_err[k] = sum(knn_tst != tst_pop)/length(tst_pop)
+  conf_tst <- confusionMatrix(data = knn_tst, reference = tst_pop)
+  tst_err[k] = 1 - conf_tst$overall["Accuracy"]
+  list_tst_strt[[k]] <- data.frame(
+    k = k, afr_err = 1 - conf_tst$byClass["Class: afr",]["Balanced Accuracy"], 
+    amr_err = 1 - conf_tst$byClass["Class: amr",]["Balanced Accuracy"], 
+    eas_err = 1 - conf_tst$byClass["Class: eas",]["Balanced Accuracy"], 
+    fin_err = 1 - conf_tst$byClass["Class: fin",]["Balanced Accuracy"], 
+    nfe_err = 1 - conf_tst$byClass["Class: nfe",]["Balanced Accuracy"], 
+    sas_err = 1 - conf_tst$byClass["Class: sas",]["Balanced Accuracy"]
+    )
   }
 
-knn_df <- data.frame(k = seq(k_times), trn_err = trn_err * 100, tst_err = tst_err * 100) %>% 
+full_trn_strt <- do.call(rbind, list_trn_strt)
+rownames(full_trn_strt) <- NULL
+
+full_trn_df <- full_trn_strt %>% 
+  tidyr::pivot_longer(
+    cols = c(afr_err, amr_err, eas_err, fin_err, nfe_err, sas_err),
+    names_to = "pop", values_to = "err")
+
+ggplot2::ggplot(dplyr::filter(full_trn_df, pop %in% c("amr_err", "fin_err","nfe_err")),
+                ggplot2::aes(x = 1/k, y = err * 100, color = pop)) + geom_line() +
+  ggplot2::xlab("1/k") + ggplot2::ylab("Error rate (%)") +
+  scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry")
+
+full_tst_strt <- do.call(rbind, list_tst_strt)
+rownames(full_tst_strt) <- NULL
+
+full_tst_df <- dplyr::filter(full_tst_strt, pop %in% c("amr_err", "fin_err","nfe_err")) %>% 
+  tidyr::pivot_longer(
+    cols = c(afr_err, amr_err, eas_err, fin_err, nfe_err, sas_err),
+    names_to = "pop", values_to = "err")
+
+ggplot2::ggplot(dplyr::filter(full_tst_df, pop %in% c("amr_err", "fin_err","nfe_err")), 
+                ggplot2::aes(x = 1/k, y = err * 100, color = pop)) + geom_line() +
+  ggplot2::xlab("1/k") + ggplot2::ylab("Error rate (%)") +
+  scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry")
+```
+
+```{r}
+
+knn_df <- data.frame(k = seq(k_times), trn_err = trn_err, tst_err = tst_err) %>% 
   tidyr::pivot_longer(cols = c(trn_err, tst_err), names_to = "grouping", values_to = "prop")
 
-ggplot2::ggplot(knn_df, ggplot2::aes(x = k, y = prop, color = grouping)) +
+ggplot2::ggplot(knn_df, ggplot2::aes(x = 1/k, y = prop * 100, color = grouping)) +
   geom_line() +
-  ggplot2::xlab("k") +ggplot2::ylab("Error rate (%)") +
+  ggplot2::xlab("1/k") +ggplot2::ylab("Error rate (%)") +
   theme(legend.title = element_blank()) +
   scale_color_manual(name = "val", 
                      labels=c("Training", "Test"), 
                      values = brewer.pal(3, "Dark2")[1:2])
 
+class_conf <- as.data.frame(conf_tst$byClass)
+
+dplyr::filter(knn_df, grouping == "tst_err") %>% 
+  dplyr::summarise(min = min(prop)) %>%  
+  as.numeric() * 100
+
+mywidth <- 2250
 ggplot2::ggsave("output/02_KNN_training.tiff", device = "tiff", units = "px", 
                 width = mywidth, height = mywidth * 0.75, dpi = "print")
-
-conf <- confusionMatrix(data = knn_tst, reference = tst_pop)
 ```
 
 The selected number for the maximum number of k is 30, the square root
