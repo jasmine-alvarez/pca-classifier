@@ -54,6 +54,7 @@ library(GGally)
 library(RColorBrewer)
 library(ggnewscale)
 library(caret)
+library(rpart)
 
 source(file = "../code/00_helper.R")
 
@@ -243,6 +244,8 @@ ggplot2::ggplot(dplyr::filter(full_trn_df, pop %in% c("amr_err", "fin_err","nfe_
                 ggplot2::aes(x = 1/k, y = err * 100, color = pop)) + geom_line() +
   ggplot2::xlab("1/k") + ggplot2::ylab("Error rate (%)") +
   scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry")
+ggplot2::ggsave("output/02_KNN_trn_strt.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
 
 full_tst_strt <- do.call(rbind, list_tst_strt)
 rownames(full_tst_strt) <- NULL
@@ -256,6 +259,8 @@ ggplot2::ggplot(dplyr::filter(full_tst_df, pop %in% c("amr_err", "fin_err","nfe_
                 ggplot2::aes(x = 1/k, y = err * 100, color = pop)) + geom_line() +
   ggplot2::xlab("1/k") + ggplot2::ylab("Error rate (%)") +
   scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry")
+ggplot2::ggsave("output/02_KNN_tst_strt.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
 ```
 
 ```{r}
@@ -293,8 +298,6 @@ The table of all samples and their ancestries, either predicted or
 already labeled, can be found below.
 
 ```{r echo=TRUE, predict, fig.align='center'}
-evec_unl <- evec %>% tibble::column_to_rownames("sample_id") %>% 
-  dplyr::filter(is.na(ancestry)) %>% dplyr::select(-ancestry) %>% dplyr::select(PC1:PC5)
 prd_unl <- class::knn(train = evec_trn, test = evec_unl, cl = trn_pop, k = 20, prob = F)
 
 evec[is.na(evec$ancestry),"ancestry"] <- as.character(prd_unl)
@@ -385,3 +388,8 @@ the y-axis at the right of plot then move to the 1st column, where "PC1"
 is labeled on the x-axis at the bottom of the plot. The corresponding
 plot for labeled vs unlabeled samples can be found by following the
 inverse of the previous step or moving diagonally from the first plot.
+
+```{r trees}
+trn_tree <- rpart::rpart(ancestry ~ ., data = evec_lbl, method = "class")
+trn_res <- rpart::xpred.rpart(trn_tree)
+```
