@@ -55,6 +55,9 @@ library(RColorBrewer)
 library(ggnewscale)
 library(caret)
 library(rpart)
+# library(rattle)
+# library(partykit)
+library(ggdendro)
 
 source(file = "../code/00_helper.R")
 
@@ -185,12 +188,14 @@ projected_retx <- predict(trn_pca, gt) %>%
 evec_lbl <- projected_retx %>% 
   dplyr::select(sample_id:PC3) %>% 
   tibble::column_to_rownames("sample_id") %>% 
-  dplyr::filter(!is.na(ancestry))
+  dplyr::filter(!is.na(ancestry)) %>% 
+  dplyr::mutate(ancestry = as.factor(ancestry))
 
 evec_unl <- projected_retx %>% 
   dplyr::select(sample_id:PC3) %>% 
   tibble::column_to_rownames("sample_id") %>% 
-  dplyr::filter(is.na(ancestry))
+  dplyr::filter(is.na(ancestry)) %>% 
+  dplyr::select(-ancestry)
 
 evec_trn <- evec_lbl[trn_idx,-1]
 evec_tst <- evec_lbl[-trn_idx, -1]
@@ -208,7 +213,7 @@ list_tst_strt <- list()
 
 for(k in seq(k_times)){
   knn_trn <- class::knn(train = evec_trn, test = evec_trn, cl = trn_pop, k = k, prob = F)
-  conf_trn <- confusionMatrix(data = knn_trn, reference = trn_pop)
+  conf_trn <- caret::confusionMatrix(data = knn_trn, reference = trn_pop)
   trn_err[k] = 1 - conf_trn$overall["Accuracy"]
   list_trn_strt[[k]] <- data.frame(
     k = k, afr_err = 1 - conf_trn$byClass["Class: afr",]["Balanced Accuracy"], 
@@ -391,5 +396,48 @@ inverse of the previous step or moving diagonally from the first plot.
 
 ```{r trees}
 trn_tree <- rpart::rpart(ancestry ~ ., data = evec_lbl, method = "class")
-trn_res <- rpart::xpred.rpart(trn_tree)
+
+plot(as.party(trn_tree))
+text(trn_tree)
+
+mywidth <- 2250
+
+ggplot2::ggsave("../output/03_pc_tree.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
+
+cp_trn_tree <- rpart::printcp(trn_tree)
+
+projected_tree <- predict(trn_tree, evec_unl, type = "class")
+projected_tree
+
+print_tree <- printcp(trn_tree) %>% as.data.frame()
+
+min_cp <- trn_tree$cptable[which.min(trn_tree$cptable[,"xerror"]),"CP"]
+
+ddata <- ggdendro::dendro_data(trn_tree)
+
+ggplot() +
+  geom_segment(data = ddata$segments, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_text(data = ddata$labels, aes(x = x, y = y, label = label), size = 3, vjust = 0) + 
+  geom_text(data = ddata$leaf_labels, aes(x = x, y = y, label = label), size = 3, vjust = 1) +
+  theme_dendro()
+
+prd_unl_tree <- predict(trn_tree, newdata = evec_unl, type = "class")
+prd_unl_knn <- class::knn(train = evec_trn, test = evec_unl, cl = trn_pop, k = 20, prob = F)
+
+evec_unl_new <- dplyr::mutate(evec_unl, prd_knn = prd_unl_knn, prd_tree = prd_unl_tree) %>% 
+  dplyr::relocate(prd_knn, prd_tree)
+
+unl_tree <- rpart::rpart(prd_tree ~ PC1 + PC2 + PC3, data = evec_unl_new, method = "class")
+udata <- ggdendro::dendro_data(unl_tree)
+
+ggplot() +
+  geom_segment(data = udata$segments, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_text(data = udata$labels, aes(x = x, y = y, label = label), size = 3, vjust = 0) + 
+  geom_text(data = udata$leaf_labels, aes(x = x, y = y, label = label), size = 3, vjust = 1) +
+  theme_dendro()
+
+### TODO: compare accuracy between two
+### make pca of all samples, labeled by knn vs tree
+
 ```
