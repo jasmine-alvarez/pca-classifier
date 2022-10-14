@@ -6,7 +6,8 @@ trn_plot <- function(pc_a, pc_b) {
     scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
     ggplot2::xlab(paste0("PC", pc_a, " (", round(trn_pve$pve[pc_a], 2) * 100, "% PVE)")) +
     ggplot2::ylab(paste0("PC3", pc_b," (", round(trn_pve$pve[pc_b], 2) * 100, "% PVE)")) +
-    ggplot2::theme(text = element_text(size = 20), legend.text = element_text(size = 20))
+    ggplot2::theme(text = element_text(size = 16), legend.text = element_text(size = 16),
+                   legend.key = element_blank())
   }
 
 pca_plot <- function(pc_a, pc_b, grp_by) {

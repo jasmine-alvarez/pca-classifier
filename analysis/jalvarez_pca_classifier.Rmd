@@ -55,9 +55,6 @@ library(RColorBrewer)
 library(ggnewscale)
 library(caret)
 library(rpart)
-# library(rattle)
-# library(partykit)
-library(ggdendro)
 
 source(file = "../code/00_helper.R")
 
@@ -98,15 +95,13 @@ Make plot.
 ggplot2::ggplot(dplyr::filter(trn_pve, pc <= 10), aes(x = pc, y = pve * 100)) +
   geom_line(stat = "identity") +
   scale_x_continuous(breaks = c(0, seq(10))) + 
-  scale_y_continuous(breaks = c(0, seq(1, 10, 2))) +
   ylab("Proportion of variance \nexplained (%)") +
   xlab("Principal component (PC)") + ylim(0, 10) +
-  ggplot2::theme(text = element_text(size = 20))
+  ggplot2::theme(axis.title = element_text(size = 20), axis.text = element_text(size = 16))
 
 mywidth <- 2250
-ggplot2::ggsave("../output/00_labeled_scree.tiff", device = "tiff", units = "px", 
+ggplot2::ggsave("output/00_labeled_scree.tiff", device = "tiff", units = "px", 
                 width = mywidth, height = mywidth * 0.75, dpi = "print")
-
 ```
 
 ## 01. First 3 principal components capture 46% of variance explained
@@ -128,6 +123,20 @@ retx <- as.data.frame(trn_pca$x) %>%
   dplyr::relocate(sample_id, ancestry) %>% 
   dplyr::select(sample_id:PC3)
 
+dens_plot <- retx %>% pivot_longer(cols = c(PC1, PC2, PC3), names_to = "pc_name", values_to = "ev") %>% 
+  dplyr::mutate(ancestry = as.factor(ancestry))
+
+ggplot2::ggplot(dens_plot) +
+  geom_density(aes(x = ev, fill = ancestry, alpha = 0.5)) +
+  facet_grid(pc_name ~ ., scales = "free")+
+  scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry") +
+  ggplot2::xlab("Eigenvalues") + ylab("Density") + ylim(0, 0.6) +
+  ggplot2::theme(axis.text = element_text(size = 16), axis.title = element_text(size = 20),
+                 strip.text = element_text(size = 16))
+
+ggplot2::ggsave("output/00_labeled_only_var.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
+
 pca_matrix <- ggpairs(retx, columns = paste0("PC", seq(3)),
                     upper = NULL, lower = NULL, diag = NULL, 
                     progress = F, legend = GGally::grab_legend(trn_plot(1, 2)),
@@ -136,22 +145,24 @@ pca_matrix <- ggpairs(retx, columns = paste0("PC", seq(3)),
 for (j in c(1,2)) {
   for (i in c(2,3)) {
     if (i > j) {
-      pca_matrix[i, j] <- trn_plot(j, i)
+      pca_matrix[i, j] <- trn_plot(j, i) + xlim(-25, 35) +
+        ggplot2::theme(
+          axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16),
+          axis.ticks = element_line(size = 1)
+          )
       }
   }
 }
-
 for (i in seq(3)) {
   pca_matrix[i,i] <- ggally_text(
     paste0("PC", i," (", round(trn_pve$pve[i], 3) * 100, "%\nof variance\nexplained)"),
-    mapping = ggplot2::aes(size = 1), color = I("black")) +
+    mapping = ggplot2::aes(size = 3), color = I("black")) +
     theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-          axis.ticks = element_blank(), axis.ticks.y = element_blank(), 
-          axis.text.y = element_blank())
+          axis.text = element_blank(), axis.ticks = element_blank())
 }
-
 pca_matrix
-ggplot2::ggsave("output/00_labeled_PCA.tiff", device = "tiff", units = "px", 
+
+ggplot2::ggsave("output/00_labeled_PCA_legend.tiff", device = "tiff", units = "px", 
                 width = mywidth, height = mywidth * 0.75, dpi = "print")
 ```
 
@@ -243,11 +254,12 @@ rownames(full_trn_strt) <- NULL
 full_trn_df <- full_trn_strt %>% 
   tidyr::pivot_longer(
     cols = c(afr_err, amr_err, eas_err, fin_err, nfe_err, sas_err),
-    names_to = "pop", values_to = "err")
+    names_to = "pop", values_to = "err") %>% 
+  dplyr::mutate(datatype = "Training")
 
-ggplot2::ggplot(dplyr::filter(full_trn_df, pop %in% c("amr_err", "fin_err","nfe_err")),
-                ggplot2::aes(x = 1/k, y = err * 100, color = pop)) + geom_line() +
-  ggplot2::xlab("1/k") + ggplot2::ylab("Error rate (%)") +
+ggplot2::ggplot(full_trn_df,
+                ggplot2::aes(x = 1/k, y = err * 100, color = pop)) + 
+  geom_line() + ggplot2::xlab("1/k") + ggplot2::ylab("Error rate (%)") +
   scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry")
 ggplot2::ggsave("output/02_KNN_trn_strt.tiff", device = "tiff", units = "px", 
                 width = mywidth, height = mywidth * 0.75, dpi = "print")
@@ -255,39 +267,45 @@ ggplot2::ggsave("output/02_KNN_trn_strt.tiff", device = "tiff", units = "px",
 full_tst_strt <- do.call(rbind, list_tst_strt)
 rownames(full_tst_strt) <- NULL
 
-full_tst_df <- dplyr::filter(full_tst_strt, pop %in% c("amr_err", "fin_err","nfe_err")) %>% 
+full_tst_df <- full_tst_strt %>% 
   tidyr::pivot_longer(
     cols = c(afr_err, amr_err, eas_err, fin_err, nfe_err, sas_err),
-    names_to = "pop", values_to = "err")
+    names_to = "pop", values_to = "err") %>% 
+  dplyr::mutate(datatype = "Test")
 
-ggplot2::ggplot(dplyr::filter(full_tst_df, pop %in% c("amr_err", "fin_err","nfe_err")), 
-                ggplot2::aes(x = 1/k, y = err * 100, color = pop)) + geom_line() +
+full_df <- do.call(rbind, list(full_trn_df, full_tst_df)) %>% 
+  dplyr::group_by(pop, datatype)
+rownames(full_df) <- NULL
+
+ggplot2::ggplot(full_df, ggplot2::aes(x = 1/k, y = err * 100, color = pop, linetype = datatype)) + 
+  facet_wrap(pop ~ ., nrow = 3, ncol = 2) +
+  geom_line(size = 1) +
   ggplot2::xlab("1/k") + ggplot2::ylab("Error rate (%)") +
-  scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry")
+  scale_color_manual(values = brewer.pal(6, "Set2"), name = "Ancestry", labels = c("AFR", "AMR", "EAS", "FIN", "NFE", "SAS")) +
+  ggplot2::theme(legend.key = element_blank(), 
+                 legend.title = element_blank(), strip.text = element_blank(),
+                 axis.title = element_text(size = 16), axis.text = element_text(size = 12),
+                 legend.text = element_text(size = 12))
+
 ggplot2::ggsave("output/02_KNN_tst_strt.tiff", device = "tiff", units = "px", 
                 width = mywidth, height = mywidth * 0.75, dpi = "print")
 ```
 
 ```{r}
-
 knn_df <- data.frame(k = seq(k_times), trn_err = trn_err, tst_err = tst_err) %>% 
   tidyr::pivot_longer(cols = c(trn_err, tst_err), names_to = "grouping", values_to = "prop")
 
 ggplot2::ggplot(knn_df, ggplot2::aes(x = 1/k, y = prop * 100, color = grouping)) +
-  geom_line() +
+  geom_line(size = 1, shape = grouping) +
   ggplot2::xlab("1/k") +ggplot2::ylab("Error rate (%)") +
   theme(legend.title = element_blank()) +
   scale_color_manual(name = "val", 
                      labels=c("Training", "Test"), 
-                     values = brewer.pal(3, "Dark2")[1:2])
+                     values = brewer.pal(3, "Dark2")[1:2]) +
+  ylim(0, 10) +
+  ggplot2::theme(axis.title = element_text(size = 20), axis.text = element_text(size = 16),
+                 legend.text = element_text(size = 16), legend.key = element_blank())
 
-class_conf <- as.data.frame(conf_tst$byClass)
-
-dplyr::filter(knn_df, grouping == "tst_err") %>% 
-  dplyr::summarise(min = min(prop)) %>%  
-  as.numeric() * 100
-
-mywidth <- 2250
 ggplot2::ggsave("output/02_KNN_training.tiff", device = "tiff", units = "px", 
                 width = mywidth, height = mywidth * 0.75, dpi = "print")
 ```
@@ -303,17 +321,19 @@ The table of all samples and their ancestries, either predicted or
 already labeled, can be found below.
 
 ```{r echo=TRUE, predict, fig.align='center'}
-prd_unl <- class::knn(train = evec_trn, test = evec_unl, cl = trn_pop, k = 20, prob = F)
+prd_unl <- class::knn(train = evec_trn, test = evec_unl, cl = trn_pop, k = 5, prob = F)
 
-evec[is.na(evec$ancestry),"ancestry"] <- as.character(prd_unl)
-evec_df <- evec %>% 
-  dplyr::mutate(grouping = as.character(sample_id %in% rownames(lbl_gt))) %>% 
+projected_df <- projected_retx %>% 
+  dplyr::mutate(grouping = as.character(sample_id %in% rownames(evec_lbl))) %>% 
   dplyr::mutate(grouping = tolower(grouping)) %>% 
-  dplyr::relocate(sample_id, ancestry, grouping)
+  dplyr::relocate(sample_id, ancestry, grouping) %>% 
+  dplyr::select(sample_id:PC3)
+myprd <- unlist(prd_knn$prd) %>% as.character()
+projected_df[is.na(projected_df$ancestry),"ancestry"] <- myprd
 
-evec_df$grouping[evec_df$grouping == "true"] <- "labeled"
-evec_df$grouping[evec_df$grouping == "false"] <- "predicted"
-levels(evec_df$grouping) <- c("labeled", "predicted")
+projected_df$grouping[projected_df$grouping == "true"] <- "labeled"
+projected_df$grouping[projected_df$grouping == "false"] <- "predicted"
+levels(projected_df$grouping) <- c("labeled", "predicted")
 
 # DT::datatable(evec_df, options = list(scrollX = T))
 write.table(evec_df, "output/02_predicted_ancestry.txt", col.names = T, row.names = F, 
@@ -337,7 +357,7 @@ plot for labeled vs unlabeled samples can be found by following the
 inverse of the previous step or moving diagonally from the first plot.
 
 ```{r echo=TRUE, all_pcs, fig.align='center'}
-pca_df <- evec_df %>% 
+pca_df <- projected_df %>% 
   tidyr::pivot_longer(c(ancestry, grouping), names_to = "grp", values_to = "val")
 levels(pca_df$grp) = c("ancestry", "grouping")
 
@@ -348,42 +368,47 @@ plot_legend <- ggplot2::ggplot(subset(pca_df, grp == "ancestry"), aes(x = PC1, y
   geom_jitter(data = subset(pca_df, grp == "grouping"), aes(color = val)) +
   scale_color_manual(values = brewer.pal(3, "Dark2")[1:2], name = "grouping")
 
+
 pca_plot <- function(pc_a, pc_b, grp_by) {
   mplot <- ggplot2::ggplot(subset(pca_df, grp == grp_by), aes_string(x = pc_a, y = pc_b)) +
-    geom_jitter(aes(color = val)) + theme(legend.position = "none") + xlim(-40, 40) +
-    ylim(-40, 40)
+    geom_jitter(aes(color = val)) + theme(legend.position = "none")
   if (grp_by == "ancestry") {
     mplot <- mplot + scale_color_manual(values = brewer.pal(6, "Set2"), name = grp_by)
     } else if (grp_by == "grouping") {
-    mplot <- mplot + scale_color_manual(values = brewer.pal(3, "Dark2")[1:2], name = "grouping")
+    mplot <- mplot + scale_color_manual(values = brewer.pal(3, "Dark2")[1:2], name = "grouping")+ 
+      scale_color_manual(values = brewer.pal(6, "Set2"), name = grp_by)
     }
   return(mplot)
   }
 
-pca_matrix <- ggpairs(pca_df, columns = c("PC1", "PC2", "PC3", "PC4", "PC5"),
+pca_matrix <- ggpairs(pca_df, columns = c("PC1", "PC2", "PC3"),
                     upper = NULL, lower = NULL, diag = NULL, 
                     legend = GGally::grab_legend(plot_legend),
                     progress = F, switch = "x")
 
-for (j in seq(4)) {
-  for (i in seq(2, 5)) {
+for (j in seq(2)) {
+  for (i in seq(2, 3)) {
     if (i > j) {
-      pca_matrix[i,j] <- pca_plot(paste0("PC", j), paste0("PC", i), "ancestry")
-      pca_matrix[j,i] <- pca_plot(paste0("PC", j), paste0("PC", i), "grouping")
+      pca_matrix[i,j] <- pca_plot(paste0("PC", j), paste0("PC", i), "ancestry") +   
+      ggplot2::theme(text = element_text(size = 16), legend.text = element_text(size = 16),
+                   legend.key = element_blank())
+      pca_matrix[j,i] <- pca_plot(paste0("PC", j), paste0("PC", i), "grouping") +   
+      ggplot2::theme(text = element_text(size = 16), legend.text = element_text(size = 16),
+                   legend.key = element_blank())
     }}
   }
 
-for (i in seq(5)) {
+for (i in seq(3)) {
   pca_matrix[i,i] <- ggally_text(
-    paste0("PC", i," (", round(pca_pve$pve[i], 3), "%\nof variance\nexplained)"),
-    mapping = ggplot2::aes(size = 1), color = I("black")) +
+    paste0("PC", i," (", round(trn_pve$pve[i], 3) * 100, "%\nof variance\nexplained)"),
+    mapping = ggplot2::aes(size = 3), color = I("black")) +
     theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-          axis.ticks = element_blank(), axis.ticks.y = element_blank(), 
-          axis.text.y = element_blank())
+          axis.text = element_blank(), axis.ticks = element_blank())
 }
 
 pca_matrix
-ggsave("output/03_pca_matrix.png", height = 6, width = 8, device = "png")
+ggsave("output/03_pca_matrix.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
 ```
 
 The labels for each principal component are positioned to correspond to
@@ -396,31 +421,9 @@ inverse of the previous step or moving diagonally from the first plot.
 
 ```{r trees}
 trn_tree <- rpart::rpart(ancestry ~ ., data = evec_lbl, method = "class")
-
-plot(as.party(trn_tree))
-text(trn_tree)
-
-mywidth <- 2250
-
-ggplot2::ggsave("../output/03_pc_tree.tiff", device = "tiff", units = "px", 
-                width = mywidth, height = mywidth * 0.75, dpi = "print")
-
 cp_trn_tree <- rpart::printcp(trn_tree)
 
-projected_tree <- predict(trn_tree, evec_unl, type = "class")
-projected_tree
-
-print_tree <- printcp(trn_tree) %>% as.data.frame()
-
 min_cp <- trn_tree$cptable[which.min(trn_tree$cptable[,"xerror"]),"CP"]
-
-ddata <- ggdendro::dendro_data(trn_tree)
-
-ggplot() +
-  geom_segment(data = ddata$segments, aes(x = x, y = y, xend = xend, yend = yend)) +
-  geom_text(data = ddata$labels, aes(x = x, y = y, label = label), size = 3, vjust = 0) + 
-  geom_text(data = ddata$leaf_labels, aes(x = x, y = y, label = label), size = 3, vjust = 1) +
-  theme_dendro()
 
 prd_unl_tree <- predict(trn_tree, newdata = evec_unl, type = "class")
 prd_unl_knn <- class::knn(train = evec_trn, test = evec_unl, cl = trn_pop, k = 20, prob = F)
@@ -436,8 +439,104 @@ ggplot() +
   geom_text(data = udata$labels, aes(x = x, y = y, label = label), size = 3, vjust = 0) + 
   geom_text(data = udata$leaf_labels, aes(x = x, y = y, label = label), size = 3, vjust = 1) +
   theme_dendro()
-
+mywidth <- 2250
+ggplot2::ggsave("output/03_unlabeled_tree.tiff", device = "tiff", units = "px", 
+                width = mywidth, height = mywidth * 0.75, dpi = "print")
 ### TODO: compare accuracy between two
 ### make pca of all samples, labeled by knn vs tree
 
+```
+
+```{r compare}
+ctrl <- trainControl(method = "repeatedcv")
+
+fit_cart <- caret::train(ancestry ~ ., data = evec_lbl, subset = trn_idx, method = "rpart", 
+                         trControl = ctrl, tuneLength = 30)
+fit_bag <- caret::train(ancestry ~ ., data = evec_lbl, subset = trn_idx, method = "treebag", 
+                        trControl = ctrl)
+fit_knn <- caret::train(ancestry ~ ., data = evec_lbl, subset = trn_idx, method = "knn", 
+                        trControl = ctrl)
+fit_svm <- caret::train(ancestry ~ ., data = evec_lbl, subset = trn_idx, method = "svmRadial", 
+                        trControl = ctrl)
+
+fit_all <- caret::resamples(list(CART = fit_cart, BAG = fit_bag, KNN = fit_knn, SVM = fit_svm))
+
+scales <- list(x = list(relation = "free"), y = list(relation = "free"), cex = 2, tck = 2)
+
+prd_cart <- data.frame(mod = "cart", prd = predict(fit_cart, newdata = evec_unl, type = "raw"))
+prd_bag <- data.frame(mod = "bag", prd = predict(fit_bag, newdata = evec_unl, type = "raw"))
+prd_knn <- data.frame(mod ="knn", prd = predict(fit_knn, newdata = evec_unl, type = "raw"))
+prd_svm <- data.frame(mod = "svm", prd = predict(fit_svm, newdata = evec_unl, type = "raw"))
+
+prd_all <- do.call(rbind, list(prd_cart, prd_bag, prd_knn, prd_svm)) %>% as.data.frame()
+
+prd_matrix <- ggpairs(data.frame(cart = NA, bag = NA, knn = NA, svm = NA), columns = c("cart", "bag", "knn", "svm"),
+                    upper = NULL, lower = NULL, diag = NULL, 
+                    progress = F,
+                    switch = "both")
+
+table(prd_cart$prd, prd_bag$prd, dnn = c("cart", "bag"))
+mod_list <- c("cart", "bag", "knn", "svm")
+
+for (j in c(seq(1, 3))) {
+  for (i in seq(2,4)) {
+    if (i > j) {
+      mod_1 <- dplyr::filter(prd_all, mod == mod_list[i]) %>% 
+        dplyr::select(prd) %>% unlist() %>% as.character()
+      mod_2 <- dplyr::filter(prd_all, mod == mod_list[j]) %>% 
+        dplyr::select(prd) %>% unlist() %>% as.character()
+      print(table(mod_1, mod_2, dnn = c(mod_list[i], mod_list[j])))
+      }
+  }
+}
+
+# need to do directly on console?
+png(filename="output/03_model_bwplot.png", type="cairo",units="in",width=10, height=8, res= 300)
+scales <- list(x = list(relation = "free"), y = list(relation = "free"), cex = 2, tck = 2)
+latticeplot <- lattice::bwplot(fit_all, scales = scales, strip = FALSE)[1]
+latticeplot
+dev.off()
+
+png(filename="output/03_model_density.png", type="cairo",units="in",width=10, height=8, res=96)
+densplot <- lattice::densityplot(fit_all, scales = scales, pch = "l", alpha = 0.5)[1]
+densplot
+dev.off()
+
+mywidth <- 2250
+
+lattice::densityplot(fit_all, scales = scales, pch = "l")
+lattice::dotplot(fit_all, scales = scales)
+lattice::splom(fit_all)
+
+
+diffs_all <- diff(fit_all)
+```
+
+```{r final}
+
+
+pca_matrix <- ggpairs(retx, columns = paste0("PC", seq(3)),
+                    upper = NULL, lower = NULL, diag = NULL, 
+                    progress = F, legend = GGally::grab_legend(trn_plot(1, 2)),
+                    switch = "both")
+
+for (j in c(1,2)) {
+  for (i in c(2,3)) {
+    if (i > j) {
+      pca_matrix[i, j] <- trn_plot(j, i) + xlim(-25, 35) +
+        ggplot2::theme(
+          axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16),
+          axis.ticks = element_line(size = 1)
+          )
+      }
+  }
+}
+for (i in seq(3)) {
+  pca_matrix[i,i] <- ggally_text(
+    paste0("PC", i," (", round(trn_pve$pve[i], 3) * 100, "%\nof variance\nexplained)"),
+    mapping = ggplot2::aes(size = 3), color = I("black")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          axis.text = element_blank(), axis.ticks = element_blank())
+}
+pca_matrix
 ```
